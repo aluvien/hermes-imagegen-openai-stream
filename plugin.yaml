@@ -1,12 +1,12 @@
 name: openai-compatible
-version: 2.0.2
+version: 2.0.3
 manifest_version: 2
 requires_hermes: ">=0.20.1"
-description: GPT Image through CLIProxyAPI, New API, or any OpenAI Images-compatible gateway
-author: duu261
+description: Streaming GPT image generation and editing through OpenAI-compatible gateways, with saved partial previews
+author: "aluvien (fork of duu261/hermes-imagegen-openai-compatible)"
 license: MIT
-homepage: https://github.com/duu261/hermes-imagegen-openai-compatible
-tags: [image-generation, cliproxyapi, new-api, gpt-image]
+homepage: https://github.com/aluvien/hermes-imagegen-openai-stream
+tags: [image-generation, streaming, cliproxyapi, new-api, gpt-image]
 kind: backend
 python_dependencies:
   - "openai>=2.0,<3"

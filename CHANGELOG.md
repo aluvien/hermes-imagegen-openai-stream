@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.0.3
+
+- Introduce the `aluvien/hermes-imagegen-openai-stream` fork and streaming-focused documentation.
+- Keep the `openai-compatible` plugin/provider ID for existing configuration compatibility.
+- GPT image generation and editing use SSE streaming with `partial_images: 2` and `size: auto`.
+- Save intermediate previews and return their paths with the final image; keepalive events are ignored.
+- An interrupted stream without a completed image is an error, never a successful preview-only result.
+- Close streams and clients, use a 240-second SDK timeout, and disable automatic request retries.
+- Gateway configuration, secrets, model selection and non-GPT JSON requests stay unchanged.
+
 ## 2.0.2
 
 - Source-image URLs now go through Hermes' SSRF guard (`tools.url_safety.is_safe_url` plus

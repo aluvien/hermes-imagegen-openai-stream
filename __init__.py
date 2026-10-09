@@ -1,4 +1,4 @@
-"""OpenAI Images-compatible image provider for Hermes Agent, tuned for CLIProxyAPI and New API.
+"""Streaming OpenAI Images-compatible provider for Hermes Agent, CLIProxyAPI and New API.
 
 Routes ``image_generate`` to a gateway's ``/v1/images/generations`` and ``/v1/images/edits``.
 Settings live under ``plugins.entries.openai-compatible.settings`` in config.yaml; the API key is
@@ -39,8 +39,8 @@ except ImportError:  # pragma: no cover - older Hermes
 logger = logging.getLogger(__name__)
 
 PLUGIN_NAME = "openai-compatible"
-PLUGIN_VERSION = "2.0.2"
-USER_AGENT = f"hermes-imagegen-openai-compatible/{PLUGIN_VERSION}"
+PLUGIN_VERSION = "2.0.3"
+USER_AGENT = f"hermes-imagegen-openai-stream/{PLUGIN_VERSION}"
 
 DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_KEY_ENV = "OPENAI_COMPAT_IMAGE_API_KEY"
@@ -59,7 +59,6 @@ SIZED_MODELS = {
 }
 QUALITIES = ("auto", "low", "medium", "high", "xhigh", "max")
 DEFAULT_QUALITY = "medium"
-SIZES = {"landscape": "1536x1024", "square": "1024x1024", "portrait": "1024x1536"}
 
 MAX_SOURCE_IMAGE_BYTES = 50 * 1024 * 1024
 MAX_ERROR_CHARS = 300
@@ -313,7 +312,7 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
 
     @property
     def display_name(self) -> str:
-        return "OpenAI-Compatible (CLIProxyAPI / New API)"
+        return "OpenAI-Compatible Streaming (CLIProxyAPI / New API)"
 
     # -- settings --------------------------------------------------------------------
 
@@ -369,9 +368,9 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
 
     def get_setup_schema(self) -> Dict[str, Any]:
         return {
-            "name": "OpenAI-Compatible (CLIProxyAPI / New API)",
+            "name": "OpenAI-Compatible Streaming (CLIProxyAPI / New API)",
             "badge": "gateway",
-            "tag": "GPT Image via CLIProxyAPI, New API, or another OpenAI Images gateway",
+            "tag": "Streaming GPT Image with saved previews via an OpenAI-compatible gateway",
             "env_vars": [
                 {"key": DEFAULT_KEY_ENV, "prompt": "Gateway API key (empty for keyless local gateways)",
                  "secret": True, "optional": True},
@@ -435,24 +434,53 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
             return fail(str(exc), "io_error")
 
         request: Dict[str, Any] = {"model": api_model, "prompt": prompt, "n": 1}
-        size = SIZES[aspect]
+        size = "auto"
         if quality is not None:
             request["size"] = size
             request["quality"] = quality
+            request["stream"] = True
+            request["partial_images"] = 2
         if is_edit:
             request["image"] = files if len(files) > 1 else files[0]
 
         secrets = [api_key]
+        partial_images: List[str] = []
+        item = None
         try:
             # The SDK fills organization/project from OPENAI_ORG_ID / OPENAI_PROJECT_ID even when
             # passed None; Omit() headers are what keep those OpenAI ids away from a third party.
-            client = openai.OpenAI(
+            with openai.OpenAI(
                 base_url=base_url, api_key=api_key or "not-needed",
                 default_headers={"User-Agent": USER_AGENT, "OpenAI-Organization": openai.Omit(),
                                  "OpenAI-Project": openai.Omit()},
-            )
-            call = client.images.edit if is_edit else client.images.generate
-            response = call(**request)
+                timeout=240.0, max_retries=0,
+            ) as client:
+                call = client.images.edit if is_edit else client.images.generate
+                response = call(**request)
+                if quality is not None:
+                    completed_type = "image_edit.completed" if is_edit else "image_generation.completed"
+                    partial_type = "image_edit.partial_image" if is_edit else "image_generation.partial_image"
+                    try:
+                        for event in response:
+                            event_type = getattr(event, "type", "")
+                            if event_type == "error" or getattr(event, "error", None):
+                                raise ValueError(str(getattr(event, "error", None)
+                                                     or getattr(event, "message", "Image stream failed")))
+                            if event_type == partial_type and len(partial_images) < 2:
+                                preview = getattr(event, "b64_json", None)
+                                if preview:
+                                    try:
+                                        partial_images.append(str(save_b64_image(preview, prefix="openai_compat_partial")))
+                                    except Exception as exc:
+                                        return fail(f"Could not save preview image ({type(exc).__name__})", "io_error")
+                            elif event_type == completed_type:
+                                item = event
+                                break
+                    finally:
+                        response.close()
+                else:
+                    data = getattr(response, "data", None) or []
+                    item = data[0] if data else None
         except openai.APIStatusError as exc:
             error, error_type = _status_error(exc, secrets)
             return fail(error, error_type)
@@ -465,10 +493,8 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
             logger.debug("%s image request failed: %s", PLUGIN_NAME, type(exc).__name__)
             return fail(f"Image request failed ({type(exc).__name__}): {_redact(str(exc), secrets)}", "api_error")
 
-        data = getattr(response, "data", None) or []
-        if not data or data[0] is None:
-            return fail("Gateway returned no image data", "empty_response")
-        item = data[0]
+        if item is None:
+            return fail("Gateway returned no completed image; the stream may have ended early", "empty_response")
         b64_data = getattr(item, "b64_json", None)
         url_data = getattr(item, "url", None)
         try:
@@ -484,6 +510,7 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
         extra: Dict[str, Any] = {"api_model": api_model}
         if quality is not None:
             extra.update(requested_size=size, requested_quality=quality)
+            extra.update(stream=True, requested_partial_images=2, partial_images=partial_images)
         output_size = _file_dims(image_ref)
         if output_size:
             extra["output_size"] = output_size

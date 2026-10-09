@@ -1,167 +1,147 @@
-# hermes-imagegen-openai-compatible
+# hermes-imagegen-openai-stream
 
-GPT Image for [Hermes Agent](https://github.com/NousResearch/hermes-agent) through your own gateway:
-[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (CPA), [New API](https://github.com/QuantumNous/new-api),
-or any server that speaks the OpenAI Images API (`/v1/images/generations` and `/v1/images/edits`).
+为 **Hermes Agent** 提供基于 OpenAI Images 兼容接口的 **SSE 流式图片生成与编辑**。
 
-It plugs into the standard `image_generate` tool as the `openai-compatible` image provider. Chat
-routing, `OPENAI_BASE_URL`, `OPENAI_API_KEY` and every other Hermes subsystem stay untouched.
+本项目是 [duu261/hermes-imagegen-openai-compatible](https://github.com/duu261/hermes-imagegen-openai-compatible)
+的 fork。在保留原插件网关配置、密钥隔离、错误分类和参考图片编辑能力的基础上，
+将 GPT 图片模型的请求改为流式模式，支持接收并保存中间预览图与最终图片。
 
-## Do you need this plugin?
+适用于支持 Images 流式接口的 CLIProxyAPI、New API 或其他 OpenAI 兼容网关。
+**支持非流式 Images API 并不代表支持 SSE，请先确认网关与上游支持流式生图。**
 
-Hermes ships a bundled `openai` image provider that also accepts a custom endpoint
-(`image_gen.openai.base_url` plus `image_gen.openai.key_env`). If you call OpenAI directly, or a
-gateway that behaves exactly like OpenAI, use the bundled one.
+## 与原插件有什么不同？
 
-Use this plugin when your images go through CPA or New API:
+以下对比以原插件 **2.0.2** 为基准，本 fork 当前版本为 **2.0.3**。
 
-- **Gateway-aware errors.** HTTP status and the gateway's own message come back to the model,
-  with hints for the usual gateway failures (Cloudflare `1010`, `524` timeouts, disabled channels,
-  wrong `/v1` root). A missing reference image is reported as `io_error` with its path before any
-  request is sent, so the model regenerates instead of retrying blind.
-- **Requested vs returned size.** Results include `requested_size`, `requested_quality` and the
-  decoded `output_size`, because Codex-backed gateways pick their own dimensions.
-- **Gateway-defined models.** Any model id the gateway serves (for example a Gemini image model
-  behind CPA) is sent verbatim, without the GPT-only `size` and `quality` fields that such
-  channels reject.
-- **Stricter source-image loading.** HTTPS only through Hermes' SSRF guard (private, CGNAT and
-  link-local hosts refused, connect-time IP pinning), no redirects, image magic bytes required,
-  50 MB cap.
+| 功能 | 原插件 2.0.2 | 本项目 |
+|---|---|---|
+| GPT 图片请求 | 等待完整 JSON 响应 | SSE 流式接收 |
+| 中间预览 | 不请求 | 请求最多 2 张并保存 |
+| 图片尺寸 | 按宽高比指定固定尺寸 | `size: auto`，由后端决定 |
+| 最终结果解析 | JSON 的 `data[0]` | 流中的 completed 事件 |
+| 自动重试 | 使用 SDK 默认行为 | 关闭，减少重复生成风险 |
+| 网关、密钥与模型配置 | 独立于聊天配置 | 保留原有方式 |
+| 参考图片编辑 | 支持 | 保留，GPT 模型使用流式响应 |
+| 非 GPT 网关模型 | 非流式 JSON | 保留原有方式 |
 
-## Install
+**这不是 Hermes 界面实时预览功能。** 插件会在生成过程中接收并保存预览图，
+但同步的 `image_generate` 工具仍在最终图片完成后返回结果。
 
-From the [Hermes plugin catalog](https://hermes-agent.nousresearch.com/docs/plugins/openai-compatible)
-(recommended):
+## 安装
+
+从本 fork 仓库安装，而不是通过原插件的目录条目安装：
 
 ```bash
-hermes plugins install openai-compatible
+hermes plugins install aluvien/hermes-imagegen-openai-stream
 hermes plugins enable openai-compatible
 ```
 
-This installs the commit the catalog maintainers reviewed. `hermes plugins update openai-compatible`
-moves to a newer release only after its catalog pin is bumped.
+当前仍保留插件 ID 与 provider ID：**`openai-compatible`**，以兼容已有配置。
+本项目是原插件的替代版本，不应以相同 ID 与原插件同时启用。
 
-Restart a running gateway afterwards (`hermes gateway restart`); new `hermes chat` sessions pick it
-up directly.
+如果已经安装原插件，请先备份插件目录和相关配置，再替换安装；不要盲目覆盖本地修改。
+运行中的 Hermes 进程需要重新加载插件：新 CLI 进程可以加载新版，
+运行中的网关可由操作人员执行 `hermes gateway restart`。
 
-Want unreleased changes from `main`? Install from GitHub instead. Hermes marks this as an unreviewed
-source, and `hermes plugins update openai-compatible` pulls the latest `main`:
-
-```bash
-hermes plugins install duu261/hermes-imagegen-openai-compatible
-hermes plugins enable openai-compatible
-```
-
-## Configure
+## 配置
 
 ```bash
-# 1. Select the provider and a model
 hermes config set image_gen.provider openai-compatible
 hermes config set image_gen.model gpt-image-2
-
-# 2. Point it at your gateway's API root
-hermes config set plugins.entries.openai-compatible.settings.base_url http://127.0.0.1:8317/v1
+hermes config set plugins.entries.openai-compatible.settings.base_url https://gateway.example/v1
+hermes config set plugins.entries.openai-compatible.settings.quality auto
 ```
 
-3. Put the gateway key in `~/.hermes/.env` as `OPENAI_COMPAT_IMAGE_API_KEY` (the install prompt
-   offers this). Already have the key under another name? Point at it instead of copying it:
+将网关密钥保存到 Hermes 当前配置档案的秘密变量 `OPENAI_COMPAT_IMAGE_API_KEY`。
+默认档案通常使用 `~/.hermes/.env`；不要把实际密钥写入仓库或 `config.yaml`。
+已有其他密钥变量时，可以只指定变量名：
 
 ```bash
 hermes config set plugins.entries.openai-compatible.settings.key_env MY_GATEWAY_KEY
 ```
 
-| Setting (`plugins.entries.openai-compatible.settings.*`) | Default | Meaning |
+| 设置（`plugins.entries.openai-compatible.settings.*`） | 默认值 | 说明 |
 |---|---|---|
-| `base_url` | none (required) | Gateway API root, normally ending in `/v1`. HTTPS, or plain HTTP to a private address (see below). |
-| `key_env` | `OPENAI_COMPAT_IMAGE_API_KEY` | Name of the `.env` variable holding the key. Empty key = keyless local gateway. |
-| `quality` | `medium` | `auto`, `low`, `medium`, `high`, `xhigh` or `max`, sent for GPT image models. |
+| `base_url` | 无，必须配置 | 网关 API 根地址，通常以 `/v1` 结尾 |
+| `key_env` | `OPENAI_COMPAT_IMAGE_API_KEY` | Hermes 秘密变量名称，不是密钥本身 |
+| `quality` | `medium` | `auto`、`low`、`medium`、`high`、`xhigh`、`max` |
 
-The model comes from `image_gen.model`. A quality suffix overrides the `quality` setting for that
-model: `gpt-image-2-high` sends `model: gpt-image-2, quality: high`.
+模型通过 `image_gen.model` 选择。支持的 GPT 模型包括 `gpt-image-1`、`gpt-image-1.5`、
+`gpt-image-2`、`gpt-image-2.5`、`gpt-image-2.5-flare`、`gpt-image-2.5-sunburst`。
+这些名称仅表示插件能够转发，不保证你的网关或账号已提供相应模型。
 
-**Switching models.** Hermes' `image_generate` tool has no `model` argument; the configured
-`image_gen.model` is the only selector. To switch, run `hermes config set image_gen.model <id>`
-yourself, or let the agent run it from its terminal tool before calling `image_generate`. Hermes
-re-reads config on every call, so the next generation uses the new model without a restart. The
-change is profile-wide and persists until set again.
+画质后缀优先于 `quality` 设置，例如 `gpt-image-2-high` 会发送
+`model: gpt-image-2` 和 `quality: high`。实际支持的画质由网关和上游决定。
+其他网关模型名称原样传递，不附加 GPT 专用的尺寸、画质和流式参数。
 
-| Model id | Sent as |
-|---|---|
-| `gpt-image-2`, `gpt-image-2.5`, `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst`, `gpt-image-1`, `gpt-image-1.5` | model + `size` from the aspect ratio + `quality` |
-| Any of the above + `-low`/`-medium`/`-high`/`-xhigh`/`-max`/`-auto` | base model + that quality |
-| Anything else (e.g. a Gemini image model your gateway exposes) | model only, verbatim |
+## 请求与响应
 
-Aspect ratios map to `1536x1024` (landscape), `1024x1024` (square) and `1024x1536` (portrait).
+GPT 图片模型的文生图请求示例：
 
-### Plain HTTP for self-hosted gateways
+```json
+{
+  "model": "gpt-image-2",
+  "prompt": "一只布偶小猫讲解如何做包子",
+  "n": 1,
+  "size": "auto",
+  "quality": "auto",
+  "stream": true,
+  "partial_images": 2
+}
+```
 
-The key is sent as a bearer header, so `base_url` must be HTTPS unless the gateway is reachable
-only over a private network. Plain `http://` is accepted when the host resolves **exclusively** to:
+`quality: auto` 是上述配置的示例，并非插件强制使用的画质。
+`stream`、`partial_images` 和 GPT 模型的 `size` 当前是固定请求行为。
 
-| Network | Typical use |
-|---|---|
-| `127.0.0.0/8`, `::1` | CPA on the same machine |
-| `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` | LAN, Docker service names (`http://cpa:8317/v1`) |
-| `100.64.0.0/10`, `fc00::/7` | Tailscale / CGNAT, IPv6 ULA |
+- 无参考图片时调用 `/images/generations`；提供参考图片时调用 `/images/edits`。
+- 忽略 keepalive 保活事件，接收并保存最多 2 张 partial_image 预览图。
+- 接收 completed 事件后保存最终图片；没有预览图也可以成功。
+- 流提前结束且没有最终图片时返回错误，不把预览图误当成成品。
+- 结果包含 `partial_images` 预览路径、`requested_size`、`requested_quality` 和实际 `output_size`。
 
-Anything else is refused: public addresses, link-local `169.254.0.0/16` (cloud metadata),
-hostnames that fail to resolve, and hostnames where even one resolved address is public. The check
-runs when each request is prepared, against the addresses the host resolves to at that moment.
+`partial_images: 2` 不代表生成两张成品，成品数量仍由 `n: 1` 控制。
+图片通过 Hermes 的保存函数写入 `$HERMES_HOME/cache/generated/images/`。
 
-## Gateway notes
+## 限制与安全边界
 
-These were measured on live routes; your gateway version may differ, and the gateway remains the
-source of truth for what it accepts.
+- **不自动降级或重发**：GPT 流式请求失败后不会自动改成非流式请求。
+  SDK 自动重试也已关闭；人工重新生成仍可能产生额外费用。
+- **尺寸自动选择**：GPT 请求使用 `size: auto`，`aspect_ratio` 保留为结果元数据，
+  不再映射为固定请求尺寸。可在提示词中描述构图，但不能保证精确宽高比。
+- **超时**：SDK 超时为每次网络操作 240 秒，不是整个生成过程的总时限；
+  网关、代理或上游仍可能提前终止连接。
+- **参考图片**：支持本地文件、图片 data URL 和公开 HTTPS 地址，最多 16 张。
+  HTTPS 来源使用 Hermes 的 SSRF 防护、禁用重定向、检查图片文件签名，并限制为 50 MB。
+- **网关连接**：默认要求 HTTPS；纯 HTTP 仅允许所有解析地址都位于明确支持的
+  回环、局域网、CGNAT/Tailscale 或 IPv6 ULA 网络，拒绝公网与元数据地址。
+- **输出 URL**：网关返回的图片 URL 由 Hermes 标准下载函数处理，
+  与参考图片的严格 URL 加载器不是同一安全边界。只连接可信网关。
+- **密钥隔离**：不读写聊天使用的 `OPENAI_API_KEY` 或 `OPENAI_BASE_URL`，
+  不向网关转发 OpenAI 组织或项目标识，错误信息中的密钥会脱敏。
 
-### CLIProxyAPI (CPA)
+## 开发与验证
 
-- `base_url` is the CPA listener, e.g. `http://127.0.0.1:8317/v1`; the key is a CPA API key.
-- With Codex OAuth accounts, the exact ids `gpt-image-1.5`, `gpt-image-2`, `gpt-image-2.5`,
-  `gpt-image-2.5-flare` and `gpt-image-2.5-sunburst` pass through to ChatGPT's image backend. Other
-  names become a Responses call with an image tool.
-- Codex OAuth renders at roughly medium regardless of the requested quality, and picks its own
-  size (a `2048x2048` request came back `1536x1024`). Compare `requested_*` with `output_size`
-  before paying for higher tiers. Native 2K/4K and `xhigh`/`max` need an API-key route.
-- The returned `model` only echoes the requested name; it does not prove which variant rendered.
-- Gemini image models served by CPA (for example via Antigravity accounts) also work: set their id
-  as `image_gen.model` and they are sent without `size`/`quality`.
-
-### New API
-
-- `base_url` is your New API site root plus `/v1`; the key is a New API token whose group can use
-  the image channel.
-- Enable the image model on a channel whose upstream supports `/v1/images/generations` (and
-  `/v1/images/edits` for editing). A `404` or "model not enabled" error names the gap.
-- Sites behind Cloudflare can block default HTTP client signatures (`403`, error `1010`). The
-  plugin sends its own `User-Agent`; if it is still blocked, allow it in the WAF.
-- Cloudflare cuts requests at about 125 s (`524`) while the upstream keeps rendering and billing.
-  For slow, high-quality renders, point `base_url` at a route that bypasses the CDN.
-
-## Upgrading from 1.x
-
-1.x read everything from environment variables. 2.0 still reads them as a fallback:
-`OPENAI_COMPAT_IMAGE_BASE_URL` is used when `settings.base_url` is unset, and
-`OPENAI_COMPAT_IMAGE_MODEL` when `image_gen.model` is unset. Note that `image_gen.model` now wins
-over `OPENAI_COMPAT_IMAGE_MODEL` (in 1.x the env var won). Move to the settings above and remove the
-old variables when convenient.
-
-## Trust boundary
-
-Use only a gateway you trust. When it returns an image `url` instead of `b64_json`, Hermes
-downloads that URL from the machine running Hermes with its standard image downloader, which is
-not confined to public addresses. Base64 output is saved directly. Source images you pass for
-editing go through this plugin's own restricted loader.
-
-## Development
+在具有 Hermes 运行依赖的 Python 环境中运行：
 
 ```bash
-PYTHONPATH=~/.hermes/hermes-agent python -m unittest discover -s tests -v
+PYTHONPATH=/path/to/hermes-agent PYTHONDONTWRITEBYTECODE=1 \
+  python -m unittest discover -s tests -v
 hermes plugins doctor . --ci
 hermes plugins validate .
 ```
 
-See [CHANGELOG.md](CHANGELOG.md) and [AGENTS.md](AGENTS.md).
+本地修改版本已通过 46 项自动化测试、插件验证与 Plugin Doctor，
+并完成已捕获真实 SSE 响应的离线回放，解码后的最终图片内容一致。
+测试覆盖文生图、参考图片编辑、预览图、保活、提前结束、错误脱敏、
+资源关闭，以及非 GPT 模型的原有 JSON 路径。
 
-## License
+这些结果不代表所有网关都已完成在线兼容性测试。`scripts/live_e2e.py`
+可以进行在线检查，但会调用实际生成接口并可能产生费用，不应无授权运行。
 
-MIT
+## 致谢与许可证
+
+感谢 [duu261/hermes-imagegen-openai-compatible](https://github.com/duu261/hermes-imagegen-openai-compatible)
+提供原始实现。本 fork 的主要修改是 GPT 图片请求的流式处理、预览图保存和相关测试。
+
+采用 MIT 许可证，原项目的版权声明保留在 [LICENSE](LICENSE) 中。
+更新记录见 [CHANGELOG.md](CHANGELOG.md)。

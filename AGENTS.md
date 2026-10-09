@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Contributor and agent rules for `hermes-imagegen-openai-compatible`. Public install and user docs
+Contributor and agent rules for `hermes-imagegen-openai-stream`. Public install and user docs
 live in `README.md`; keep this file about how to change the plugin safely.
 
 ## What this plugin is
@@ -12,7 +12,7 @@ live in `README.md`; keep this file about how to change the plugin safely.
   Gemini image models behind CPA) must keep working, sent verbatim without `size`/`quality`.
 - Reason to exist: Hermes' bundled `openai` image provider already accepts a custom
   `base_url`/`key_env`. This plugin earns its place only through gateway-specific behavior
-  (actionable errors, requested-vs-returned size, verbatim gateway models, strict source loading).
+  (SSE image streaming, saved previews, actionable errors, verbatim gateway models, strict source loading).
   Do not add features the bundled provider already covers unless they serve a gateway need, and
   keep the README's "Do you need this plugin?" section honest.
 
@@ -90,8 +90,11 @@ hermes plugins validate .
 
 ## Release and distribution
 
+- This fork is distributed from `aluvien/hermes-imagegen-openai-stream`; keep the plugin/provider
+  ID `openai-compatible` for configuration compatibility. GPT models use `size: auto`, SSE and
+  `partial_images: 2`; non-GPT models retain the non-streaming JSON route. Do not claim live UI previews.
 - Semver tags (`vX.Y.Z`) on `main`; changelog entry per release.
-- Discovery is the Hermes plugin catalog (`plugin-catalog/openai-compatible.yaml` in
+- The upstream plugin's discovery is the Hermes plugin catalog (`plugin-catalog/openai-compatible.yaml` in
   NousResearch/hermes-agent), pinned to an exact 40-hex SHA, with `capabilities` matching what the
   plugin registers (no tools/hooks/middleware; `requires_env` lists `OPENAI_COMPAT_IMAGE_API_KEY`).
   Every SHA bump is a new reviewed PR there. The catalog PR is opened by the maintainer, not by an
@@ -99,7 +102,7 @@ hermes plugins validate .
 - Bump cadence: each catalog bump costs a maintainer review and days of waiting. Bump right away for
   security fixes; batch other changes into fewer bumps. Keep `main` releasable, because direct
   `owner/repo` installs pull it on `hermes plugins update`.
-- The README leads with the catalog install (`hermes plugins install openai-compatible`) and keeps
-  `owner/repo` as the unreleased-changes route. The author's own live install stays a dev install.
+- The fork README leads with `hermes plugins install aluvien/hermes-imagegen-openai-stream`.
+  The upstream catalog entry does not install this fork. Keep upstream attribution and LICENSE intact.
 - Installs into a live Hermes (`hermes plugins install --force --ref <sha>`) and gateway restarts are
   the operator's actions.

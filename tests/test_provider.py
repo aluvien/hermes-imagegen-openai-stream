@@ -1,11 +1,13 @@
 import base64
 import importlib.util
+import json
 import os
 import struct
 import sys
 import tempfile
 import types
 import unittest
+import openai as real_openai
 from pathlib import Path
 from unittest.mock import patch
 
@@ -61,36 +63,67 @@ class FakeImage:
     revised_prompt = None
 
 
+class FakeStream:
+    def __init__(self, events):
+        self.events = events
+        self.closed = False
+
+    def __iter__(self):
+        for event in self.events:
+            if isinstance(event, Exception):
+                raise event
+            yield event
+
+    def close(self):
+        self.closed = True
+
+
 class FakeImages:
     def __init__(self, raise_exc=None):
         self.generate_calls = []
         self.edit_calls = []
         self.raise_exc = raise_exc
 
-    def _respond(self):
+    def _respond(self, kwargs, kind):
         if self.raise_exc is not None:
             raise self.raise_exc
+        if kwargs.get("stream"):
+            events = FakeClient.events
+            if events is None:
+                events = [types.SimpleNamespace(type=kind + ".completed", b64_json=FakeImage.b64_json)]
+            self.stream = FakeStream(events)
+            return self.stream
         return types.SimpleNamespace(data=[FakeImage()])
 
     def generate(self, **kwargs):
         self.generate_calls.append(kwargs)
-        return self._respond()
+        return self._respond(kwargs, "image_generation")
 
     def edit(self, **kwargs):
         self.edit_calls.append(kwargs)
-        return self._respond()
+        return self._respond(kwargs, "image_edit")
 
 
 class FakeClient:
     instances = []
     raise_exc: "Exception | None" = None
+    events = None
 
-    def __init__(self, *, base_url, api_key, default_headers=None):
+    def __init__(self, *, base_url, api_key, default_headers=None, timeout=None, max_retries=None):
         self.base_url = base_url
         self.api_key = api_key
         self.default_headers = default_headers or {}
         self.images = FakeImages(self.__class__.raise_exc)
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.closed = False
         self.__class__.instances.append(self)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.closed = True
 
 
 class Ctx:
@@ -109,6 +142,7 @@ class ProviderTests(unittest.TestCase):
     def setUp(self):
         FakeClient.instances.clear()
         FakeClient.raise_exc = None
+        FakeClient.events = None
         self.tmp = tempfile.TemporaryDirectory()
         self.saved_path = Path(self.tmp.name) / "out.png"
         self.saved_path.write_bytes(PNG_1536x1024)
@@ -216,7 +250,9 @@ class ProviderTests(unittest.TestCase):
         self.make().generate("draw", "landscape", model="gpt-image-2")
         call = self.call()
         self.assertEqual((call["model"], call["size"], call["quality"], call["n"]),
-                         ("gpt-image-2", "1536x1024", "medium", 1))
+                         ("gpt-image-2", "auto", "medium", 1))
+        self.assertTrue(call["stream"])
+        self.assertEqual(call["partial_images"], 2)
 
     def test_quality_setting_and_suffix(self):
         self.make(quality="high").generate("draw", "square", model="gpt-image-2.5-sunburst")
@@ -224,7 +260,7 @@ class ProviderTests(unittest.TestCase):
         FakeClient.instances.clear()
         result = self.make().generate("draw", "portrait", model="gpt-image-2.5-flare-max")
         call = self.call()
-        self.assertEqual((call["model"], call["quality"], call["size"]), ("gpt-image-2.5-flare", "max", "1024x1536"))
+        self.assertEqual((call["model"], call["quality"], call["size"]), ("gpt-image-2.5-flare", "max", "auto"))
         self.assertEqual(result["model"], "gpt-image-2.5-flare-max")
 
     def test_unknown_quality_setting_falls_back_to_medium(self):
@@ -237,6 +273,8 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(call["model"], "gemini-3.1-flash-image")
         self.assertNotIn("size", call)
         self.assertNotIn("quality", call)
+        self.assertNotIn("stream", call)
+        self.assertNotIn("partial_images", call)
 
     def test_legacy_model_env_used_when_hermes_passes_none(self):
         with patch.dict(os.environ, {"OPENAI_COMPAT_IMAGE_MODEL": "gpt-image-2.5-flare"}):
@@ -252,7 +290,7 @@ class ProviderTests(unittest.TestCase):
 
     def test_success_reports_requested_and_output_size(self):
         result = self.make().generate("draw", "square", model="gpt-image-2")
-        self.assertEqual(result["requested_size"], "1024x1024")
+        self.assertEqual(result["requested_size"], "auto")
         self.assertEqual(result["requested_quality"], "medium")
         self.assertEqual(result["output_size"], "1536x1024")
         self.assertEqual(result["api_model"], "gpt-image-2")
@@ -264,6 +302,96 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(result["modality"], "image")
         call = self.call(kind="edit_calls")
         self.assertEqual(call["image"].read(), PNG_1536x1024)
+        self.assertTrue(call["stream"])
+        self.assertEqual(call["partial_images"], 2)
+
+    def test_stream_keepalives_previews_and_completion(self):
+        FakeClient.events = [types.SimpleNamespace(type="keepalive")]
+        FakeClient.events.extend(types.SimpleNamespace(type="image_generation.partial_image",
+                                                       b64_json=FakeImage.b64_json) for index in range(3))
+        FakeClient.events.append(types.SimpleNamespace(type="image_generation.completed",
+                                                       b64_json=FakeImage.b64_json))
+        result = self.make().generate("draw", model="gpt-image-2")
+        self.assertTrue(result["success"], result)
+        self.assertEqual(len(result["partial_images"]), 2)
+        self.assertEqual(provider.save_b64_image.call_count, 3)
+        client = FakeClient.instances[0]
+        self.assertTrue(client.closed)
+        self.assertTrue(client.images.stream.closed)
+        self.assertEqual((client.timeout, client.max_retries), (240.0, 0))
+
+    def test_completed_stream_without_previews(self):
+        result = self.make().generate("draw", model="gpt-image-2")
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["partial_images"], [])
+
+    def test_preview_only_stream_is_not_success(self):
+        FakeClient.events = [types.SimpleNamespace(type="image_generation.partial_image",
+                                                   b64_json=FakeImage.b64_json)]
+        result = self.make().generate("draw", model="gpt-image-2")
+        self.assertEqual(result["error_type"], "empty_response")
+        self.assertTrue(FakeClient.instances[0].images.stream.closed)
+
+    def test_stream_error_is_redacted_and_closed(self):
+        FakeClient.events = [types.SimpleNamespace(type="error", message="invalid test-key-123456")]
+        result = self.make().generate("draw", model="gpt-image-2")
+        self.assertEqual(result["error_type"], "api_error")
+        self.assertNotIn("test-key-123456", result["error"])
+        self.assertTrue(FakeClient.instances[0].closed)
+        self.assertTrue(FakeClient.instances[0].images.stream.closed)
+
+    def test_timeout_during_stream_is_closed(self):
+        FakeClient.events = [FakeAPITimeoutError()]
+        result = self.make().generate("draw", model="gpt-image-2")
+        self.assertEqual(result["error_type"], "timeout")
+        self.assertTrue(FakeClient.instances[0].closed)
+        self.assertTrue(FakeClient.instances[0].images.stream.closed)
+
+    def test_completed_event_without_image_is_invalid(self):
+        FakeClient.events = [types.SimpleNamespace(type="image_generation.completed")]
+        result = self.make().generate("draw", model="gpt-image-2")
+        self.assertEqual(result["error_type"], "invalid_response")
+
+    def test_preview_save_failure_is_io_error(self):
+        FakeClient.events = [types.SimpleNamespace(type="image_generation.partial_image",
+                                                   b64_json=FakeImage.b64_json)]
+        provider.save_b64_image.side_effect = OSError("disk full")
+        result = self.make().generate("draw", model="gpt-image-2")
+        self.assertEqual(result["error_type"], "io_error")
+        self.assertTrue(FakeClient.instances[0].images.stream.closed)
+
+    def test_real_sdk_parses_wire_sse_for_generation_and_editing(self):
+        import httpx
+        constructor = real_openai.OpenAI
+        for is_edit in (False, True):
+            with self.subTest(is_edit=is_edit):
+                kind = "image_edit" if is_edit else "image_generation"
+                events = [{"type": "keepalive"},
+                          {"type": kind + ".partial_image", "b64_json": FakeImage.b64_json,
+                           "partial_image_index": 0},
+                          {"type": kind + ".completed", "b64_json": FakeImage.b64_json}]
+                body = "".join("event: " + event["type"] + "\ndata: " + json.dumps(event) + "\n\n"
+                               for event in events)
+                requests = []
+
+                def handler(request):
+                    requests.append(request)
+                    return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, text=body)
+
+                def factory(**kwargs):
+                    return constructor(http_client=httpx.Client(transport=httpx.MockTransport(handler)), **kwargs)
+
+                with patch.dict(sys.modules, {"openai": real_openai}), \
+                        patch.object(real_openai, "OpenAI", side_effect=factory):
+                    kwargs = {"image_url": "data:image/png;base64," + FakeImage.b64_json} if is_edit else {}
+                    result = self.make().generate("draw", model="gpt-image-2", **kwargs)
+                self.assertTrue(result["success"], result)
+                self.assertEqual(len(result["partial_images"]), 1)
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(requests[0].url.path, "/v1/images/edits" if is_edit else "/v1/images/generations")
+                if not is_edit:
+                    payload = json.loads(requests[0].content)
+                    self.assertEqual((payload["stream"], payload["partial_images"], payload["size"]), (True, 2, "auto"))
 
     def test_openai_org_and_project_env_never_sent_to_gateway(self):
         with patch.dict(os.environ, {"OPENAI_ORG_ID": "org-x", "OPENAI_PROJECT_ID": "proj-x"}):
