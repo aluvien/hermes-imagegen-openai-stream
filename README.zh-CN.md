@@ -41,9 +41,106 @@ hermes plugins enable openai-compatible
 当前仍保留插件 ID 与 provider ID：**`openai-compatible`**，以兼容已有配置。
 本项目是原插件的替代版本，不应以相同 ID 与原插件同时启用。
 
-如果已经安装原插件，请先备份插件目录和相关配置，再替换安装；不要盲目覆盖本地修改。
+如果已经安装原插件，请使用下方迁移步骤，而不是直接执行首次安装命令。
 运行中的 Hermes 进程需要重新加载插件：新 CLI 进程可以加载新版，
 运行中的网关可由操作人员执行 `hermes gateway restart`。
+
+## 从原插件迁移
+
+两个仓库都声明 `name: openai-compatible`，所以迁移会替换同一个插件目录。
+`hermes plugins update openai-compatible` **不会**把原作者的安装来源切换到这个 fork。
+需要从 fork 强制重新安装；如果旧插件锁定了提交，切换来源时还必须显式指定
+完整的 40 位提交 SHA。
+
+以下命令使用 macOS/Linux 的 Bash 兼容语法。请在目标 Hermes 配置档案的上下文中运行，
+所有命令（包括重启）都要使用相同的档案选择方式。
+
+### 1. 替换前先备份
+
+通过 Hermes 查询当前配置档案目录，不假定一定是 `~/.hermes`。
+备份放在 `plugins/` 外，防止被发现为另一个插件。
+
+```bash
+(
+  set -eu
+  config_path="$(hermes config path)"
+  env_path="$(hermes config env-path)"
+  hermes_home="$(dirname "$config_path")"
+  backup_dir="$hermes_home/plugins-backup/openai-compatible-before-stream-$(date +%Y%m%d-%H%M%S)"
+  umask 077
+  mkdir -p "$backup_dir"
+  cp -Rp "$hermes_home/plugins/openai-compatible" "$backup_dir/"
+  cp -p "$config_path" "$backup_dir/config.yaml"
+  if [ -f "$env_path" ]; then cp -p "$env_path" "$backup_dir/.env"; fi
+  if [ -f "$hermes_home/plugins/.install-metadata.json" ]; then
+    cp -p "$hermes_home/plugins/.install-metadata.json" "$backup_dir/.install-metadata.json"
+  fi
+  printf 'Backup saved to: %s\n' "$backup_dir"
+)
+```
+
+记下打印的备份位置。备份可能包含密钥，请只保存在本地，禁止上传。
+切换到不同仓库会使用干净的插件目录，不要依赖跨来源重装保留本地修改或未跟踪文件。
+如果插件目录是符号链接，安装器会拒绝替换；请单独处理这种开发安装，不要盲目删除链接。
+
+### 2. 安装已验证的 fork 提交
+
+```bash
+hermes plugins install aluvien/hermes-imagegen-openai-stream --force --ref a452d4160e013338f7b81935a46d089ad1c0a1f5 --enable
+```
+
+这会安装指定的已验证提交，不一定是 `main` 上最新的提交。
+它适用于从锁定或未锁定的原插件安装切换来源。请阅读 Hermes 的依赖与安全提示，
+不要用 `--no-deps` 替换正在启用的插件。
+
+插件 ID 仍为 `openai-compatible`，已有网关地址、密钥变量和密钥继续保留。
+如果要使用本文示例模型，只需设置下面两个选择项：
+
+```bash
+hermes config set image_gen.provider openai-compatible
+hermes config set image_gen.model gpt-image-2.5-flare
+```
+
+迁移时**不要**把正常工作的网关替换成 `https://gateway.example/v1`，也不要覆盖已有的
+自定义 `key_env`。下方配置章节用于首次配置或主动更改路由。
+
+### 3. 检查并重新加载
+
+```bash
+hermes plugins list
+hermes plugins show openai-compatible
+hermes config get image_gen.provider
+hermes config get image_gen.model
+```
+
+确认安装来源是这个 fork、锁定提交是 `a452d416…`、插件版本是 `2.0.3`。
+CLI 会话请关闭后重新启动。如果使用消息网关，执行：
+
+```bash
+hermes gateway restart
+```
+
+这会重启对应网关，请在可以中断当前工作的时机执行。
+插件加载成功不代表网关已支持 SSE；真实生图验证可能产生费用。
+
+### 后续升级与回退
+
+上述迁移命令会锁定提交。以后升级时，从 fork 重新安装，使用 `--force --ref`
+指定新的、已验证的完整 SHA。普通更新命令不能移动锁定的安装。
+如果是从这个 fork 首次安装的未锁定版本，则可以使用：
+
+```bash
+hermes plugins update openai-compatible
+```
+
+若要回到原插件 `2.0.2` 代码，可以显式安装其已知提交，然后重新加载 Hermes：
+
+```bash
+hermes plugins install duu261/hermes-imagegen-openai-compatible --force --ref 5e20ebbcfe5c6a44fd8685f16e729221dcaad829 --enable
+```
+
+这会同时恢复原仓库的安装来源记录和代码。原插件中的本地修改需要从备份中单独恢复；
+如果期间修改过其他插件或设置，不要盲目覆盖整份配置或共享安装来源记录文件。
 
 ## 配置
 
@@ -53,6 +150,8 @@ hermes config set image_gen.model gpt-image-2.5-flare
 hermes config set plugins.entries.openai-compatible.settings.base_url https://gateway.example/v1
 hermes config set plugins.entries.openai-compatible.settings.quality auto
 ```
+
+`https://gateway.example/v1` 是占位地址，请换成自己的 API 根地址，通常以 `/v1` 结尾。
 
 将网关密钥保存到 Hermes 当前配置档案的秘密变量 `OPENAI_COMPAT_IMAGE_API_KEY`。
 默认档案通常使用 `~/.hermes/.env`；不要把实际密钥写入仓库或 `config.yaml`。
@@ -141,6 +240,12 @@ hermes plugins validate .
 并完成已捕获真实 SSE 响应的离线回放，解码后的最终图片内容一致。
 测试覆盖文生图、参考图片编辑、预览图、保活、提前结束、错误脱敏、
 资源关闭，以及非 GPT 模型的原有 JSON 路径。
+
+README 命令语法已通过本机 Hermes CLI 解析器检查。五条配置写入命令在临时档案中
+实际执行，备份脚本也用测试文件执行过。锁定来源迁移及回退的控制流程在该档案中
+验证，Git 克隆和依赖发布使用模拟实现；没有替换正在使用的插件、重启网关或发送收费生图请求。
+命令参考：[Hermes CLI](https://hermes-agent.nousresearch.com/docs/reference/cli-commands/)
+与[插件安装说明](https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins/)。
 
 这些结果不代表所有网关都已完成在线兼容性测试。`scripts/live_e2e.py`
 可以进行在线检查，但会调用实际生成接口并可能产生费用，不应无授权运行。

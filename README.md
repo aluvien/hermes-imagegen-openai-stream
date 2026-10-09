@@ -42,9 +42,108 @@ hermes plugins enable openai-compatible
 The plugin and provider ID remains **`openai-compatible`** for configuration compatibility.
 This fork replaces the original plugin; do not enable both under the same ID.
 
-If the original is already installed, back up the plugin directory and relevant configuration before
-replacing it. Do not blindly overwrite local modifications. New CLI processes can load the updated
-plugin; a running gateway can be restarted by its operator with `hermes gateway restart`.
+If the original is already installed, follow the migration steps below instead of the fresh-install command.
+New CLI processes can load the updated plugin; a running gateway can be restarted by its operator
+with `hermes gateway restart`.
+
+## Migrating from the original plugin
+
+Both repositories declare `name: openai-compatible`, so migration replaces the same plugin directory.
+`hermes plugins update openai-compatible` does **not** switch an upstream installation to this fork.
+Use a forced reinstall from the fork. If the old installation is pinned, Hermes also requires an
+explicit full 40-character commit SHA when changing the source.
+
+The commands below use Bash-compatible syntax on macOS/Linux. Run them in the intended Hermes
+profile context; use the same profile selection for every command, including the restart.
+
+### 1. Back up before replacing the plugin
+
+This derives the active profile directory from Hermes, rather than assuming `~/.hermes`.
+The backup stays outside `plugins/` so it is not discovered as another plugin.
+
+```bash
+(
+  set -eu
+  config_path="$(hermes config path)"
+  env_path="$(hermes config env-path)"
+  hermes_home="$(dirname "$config_path")"
+  backup_dir="$hermes_home/plugins-backup/openai-compatible-before-stream-$(date +%Y%m%d-%H%M%S)"
+  umask 077
+  mkdir -p "$backup_dir"
+  cp -Rp "$hermes_home/plugins/openai-compatible" "$backup_dir/"
+  cp -p "$config_path" "$backup_dir/config.yaml"
+  if [ -f "$env_path" ]; then cp -p "$env_path" "$backup_dir/.env"; fi
+  if [ -f "$hermes_home/plugins/.install-metadata.json" ]; then
+    cp -p "$hermes_home/plugins/.install-metadata.json" "$backup_dir/.install-metadata.json"
+  fi
+  printf 'Backup saved to: %s\n' "$backup_dir"
+)
+```
+
+Keep the printed location. The backup may contain credentials: keep it private and never upload it.
+Switching repositories starts from a clean plugin tree, so do not rely on a different-source
+reinstall to preserve local plugin edits or untracked files. If the plugin directory is a symlink,
+the installer refuses replacement; handle that development install separately instead of deleting it blindly.
+
+### 2. Install the verified fork revision
+
+```bash
+hermes plugins install aluvien/hermes-imagegen-openai-stream --force --ref a452d4160e013338f7b81935a46d089ad1c0a1f5 --enable
+```
+
+This installs an explicit verified revision, not necessarily the newest commit on `main`.
+It works for switching both pinned and unpinned upstream installations. Review Hermes' dependency
+and security prompts. Do not use `--no-deps` to replace an active plugin.
+
+The plugin ID stays `openai-compatible`; keep your existing gateway URL, key variable, and credential.
+If you want the model used in this guide, set only these selections:
+
+```bash
+hermes config set image_gen.provider openai-compatible
+hermes config set image_gen.model gpt-image-2.5-flare
+```
+
+Do **not** replace a working gateway with `https://gateway.example/v1`, or overwrite a custom
+`key_env` during migration. The configuration section below is for setting up or deliberately changing a route.
+
+### 3. Verify and reload
+
+```bash
+hermes plugins list
+hermes plugins show openai-compatible
+hermes config get image_gen.provider
+hermes config get image_gen.model
+```
+
+Confirm the installed source is this fork, the pinned revision is `a452d416…`, and the plugin
+version is `2.0.3`. Close and reopen CLI sessions. If using the messaging gateway, run:
+
+```bash
+hermes gateway restart
+```
+
+This restarts the affected gateway; schedule it when interrupting active work is acceptable.
+Loading successfully does not prove your gateway supports SSE. An actual generation test may incur charges.
+
+### Subsequent updates and rollback
+
+The migration command pins the installation. To upgrade later, repeat the fork install command with
+`--force --ref` and a new verified full SHA. A plain update will not move a pinned installation.
+For an unpinned installation originally installed from this fork, use:
+
+```bash
+hermes plugins update openai-compatible
+```
+
+To return to the original `2.0.2` code, explicitly reinstall its known revision and reload Hermes:
+
+```bash
+hermes plugins install duu261/hermes-imagegen-openai-compatible --force --ref 5e20ebbcfe5c6a44fd8685f16e729221dcaad829 --enable
+```
+
+This restores the upstream source record as well as its code. Reapply any original local edits from
+your backup separately; do not blindly restore a whole configuration or shared install-metadata file
+after other plugins or settings have changed.
 
 ## Configuration
 
@@ -54,6 +153,8 @@ hermes config set image_gen.model gpt-image-2.5-flare
 hermes config set plugins.entries.openai-compatible.settings.base_url https://gateway.example/v1
 hermes config set plugins.entries.openai-compatible.settings.quality auto
 ```
+
+`https://gateway.example/v1` is a placeholder: replace it with your own API root, usually ending in `/v1`.
 
 Store the gateway key in the current Hermes profile's secret variable `OPENAI_COMPAT_IMAGE_API_KEY`.
 The default profile typically uses `~/.hermes/.env`. Never commit a real key or put it in `config.yaml`.
@@ -143,6 +244,13 @@ The local modified version passed 46 automated tests, plugin validation, and Plu
 An offline replay of a captured real SSE response also reproduced the final image exactly.
 Tests cover generation, editing, previews, keepalives, early termination, error redaction,
 resource cleanup, and the existing non-GPT JSON route.
+
+The README command syntax was checked against the installed Hermes CLI parsers. All five configuration
+writes were exercised in a temporary profile, and the backup script was run on fixture files.
+Pinned-source migration and rollback control flow were tested in that profile with Git cloning and
+dependency publication simulated; no live installation, gateway restart, or paid generation was performed.
+Command references: [Hermes CLI](https://hermes-agent.nousresearch.com/docs/reference/cli-commands/)
+and [plugin installation](https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins/).
 
 These checks do not prove online compatibility with every gateway. `scripts/live_e2e.py` can perform
 live checks, but invokes actual image endpoints and can incur charges; do not run it without authorization.
