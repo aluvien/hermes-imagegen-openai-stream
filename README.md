@@ -1,87 +1,96 @@
 # hermes-imagegen-openai-stream
 
-为 **Hermes Agent** 提供基于 OpenAI Images 兼容接口的 **SSE 流式图片生成与编辑**。
+**English** | [简体中文](README.zh-CN.md)
 
-本项目是 [duu261/hermes-imagegen-openai-compatible](https://github.com/duu261/hermes-imagegen-openai-compatible)
-的 fork。在保留原插件网关配置、密钥隔离、错误分类和参考图片编辑能力的基础上，
-将 GPT 图片模型的请求改为流式模式，支持接收并保存中间预览图与最终图片。
+**SSE streaming image generation and editing for Hermes Agent**, through OpenAI Images-compatible gateways.
 
-适用于支持 Images 流式接口的 CLIProxyAPI、New API 或其他 OpenAI 兼容网关。
-**支持非流式 Images API 并不代表支持 SSE，请先确认网关与上游支持流式生图。**
+This project is a fork of
+[duu261/hermes-imagegen-openai-compatible](https://github.com/duu261/hermes-imagegen-openai-compatible).
+It retains the original gateway configuration, isolated credentials, error categories, and reference-image
+editing, while adding streaming requests for GPT image models with saved intermediate previews and final images.
 
-## 与原插件有什么不同？
+Use it with CLIProxyAPI, New API, or another gateway that supports streaming Images endpoints.
+**Support for non-streaming Images requests does not imply SSE support. Check both your gateway and upstream.**
 
-以下对比以原插件 **2.0.2** 为基准，本 fork 当前版本为 **2.0.3**。
+## What changed from the original plugin?
 
-| 功能 | 原插件 2.0.2 | 本项目 |
+This comparison uses upstream **2.0.2** as the baseline. This fork is currently **2.0.3**.
+
+| Feature | Original 2.0.2 | This fork |
 |---|---|---|
-| GPT 图片请求 | 等待完整 JSON 响应 | SSE 流式接收 |
-| 中间预览 | 不请求 | 请求最多 2 张并保存 |
-| 图片尺寸 | 按宽高比指定固定尺寸 | `size: auto`，由后端决定 |
-| 最终结果解析 | JSON 的 `data[0]` | 流中的 completed 事件 |
-| 自动重试 | 使用 SDK 默认行为 | 关闭，减少重复生成风险 |
-| 网关、密钥与模型配置 | 独立于聊天配置 | 保留原有方式 |
-| 参考图片编辑 | 支持 | 保留，GPT 模型使用流式响应 |
-| 非 GPT 网关模型 | 非流式 JSON | 保留原有方式 |
+| GPT image requests | Wait for a complete JSON response | Consume SSE events |
+| Intermediate previews | Not requested | Request and save up to 2 |
+| Image dimensions | Fixed size derived from aspect ratio | `size: auto`, chosen by the backend |
+| Final image parsing | JSON `data[0]` | Stream completed event |
+| Automatic retries | SDK defaults | Disabled to reduce duplicate generation risks |
+| Gateway, credentials, and model settings | Separate from chat settings | Preserved |
+| Reference-image editing | Supported | Preserved; GPT models use streaming |
+| Non-GPT gateway models | Non-streaming JSON | Preserved |
 
-**这不是 Hermes 界面实时预览功能。** 插件会在生成过程中接收并保存预览图，
-但同步的 `image_generate` 工具仍在最终图片完成后返回结果。
+**This does not add live previews to the Hermes UI.** The plugin receives and saves previews during
+generation, but the synchronous `image_generate` tool returns only after the final image is complete.
 
-## 安装
+## Installation
 
-从本 fork 仓库安装，而不是通过原插件的目录条目安装：
+Install from this fork, not from the original plugin's catalog entry:
 
 ```bash
 hermes plugins install aluvien/hermes-imagegen-openai-stream
 hermes plugins enable openai-compatible
 ```
 
-当前仍保留插件 ID 与 provider ID：**`openai-compatible`**，以兼容已有配置。
-本项目是原插件的替代版本，不应以相同 ID 与原插件同时启用。
+The plugin and provider ID remains **`openai-compatible`** for configuration compatibility.
+This fork replaces the original plugin; do not enable both under the same ID.
 
-如果已经安装原插件，请先备份插件目录和相关配置，再替换安装；不要盲目覆盖本地修改。
-运行中的 Hermes 进程需要重新加载插件：新 CLI 进程可以加载新版，
-运行中的网关可由操作人员执行 `hermes gateway restart`。
+If the original is already installed, back up the plugin directory and relevant configuration before
+replacing it. Do not blindly overwrite local modifications. New CLI processes can load the updated
+plugin; a running gateway can be restarted by its operator with `hermes gateway restart`.
 
-## 配置
+## Configuration
 
 ```bash
 hermes config set image_gen.provider openai-compatible
-hermes config set image_gen.model gpt-image-2
+hermes config set image_gen.model gpt-image-2.5-flare
 hermes config set plugins.entries.openai-compatible.settings.base_url https://gateway.example/v1
 hermes config set plugins.entries.openai-compatible.settings.quality auto
 ```
 
-将网关密钥保存到 Hermes 当前配置档案的秘密变量 `OPENAI_COMPAT_IMAGE_API_KEY`。
-默认档案通常使用 `~/.hermes/.env`；不要把实际密钥写入仓库或 `config.yaml`。
-已有其他密钥变量时，可以只指定变量名：
+Store the gateway key in the current Hermes profile's secret variable `OPENAI_COMPAT_IMAGE_API_KEY`.
+The default profile typically uses `~/.hermes/.env`. Never commit a real key or put it in `config.yaml`.
+To explicitly select the default key variable, use the following command. It is optional because the
+plugin already defaults to the same variable:
 
 ```bash
-hermes config set plugins.entries.openai-compatible.settings.key_env MY_GATEWAY_KEY
+hermes config set plugins.entries.openai-compatible.settings.key_env OPENAI_COMPAT_IMAGE_API_KEY
 ```
 
-| 设置（`plugins.entries.openai-compatible.settings.*`） | 默认值 | 说明 |
+`key_env` is the **name of the variable holding the key**, not the key itself. Setting its name does
+not store a credential: you must still set the value of `OPENAI_COMPAT_IMAGE_API_KEY` in the current
+Hermes profile. Use another variable name only when your key is actually stored under that name.
+
+| Setting (`plugins.entries.openai-compatible.settings.*`) | Default | Meaning |
 |---|---|---|
-| `base_url` | 无，必须配置 | 网关 API 根地址，通常以 `/v1` 结尾 |
-| `key_env` | `OPENAI_COMPAT_IMAGE_API_KEY` | Hermes 秘密变量名称，不是密钥本身 |
-| `quality` | `medium` | `auto`、`low`、`medium`、`high`、`xhigh`、`max` |
+| `base_url` | None; required | Gateway API root, usually ending in `/v1` |
+| `key_env` | `OPENAI_COMPAT_IMAGE_API_KEY` | Hermes secret variable name, not the credential |
+| `quality` | `medium` | `auto`, `low`, `medium`, `high`, `xhigh`, or `max` |
 
-模型通过 `image_gen.model` 选择。支持的 GPT 模型包括 `gpt-image-1`、`gpt-image-1.5`、
-`gpt-image-2`、`gpt-image-2.5`、`gpt-image-2.5-flare`、`gpt-image-2.5-sunburst`。
-这些名称仅表示插件能够转发，不保证你的网关或账号已提供相应模型。
+All model examples in this guide use `gpt-image-2.5-flare`; this does not change the code's default model.
+Select a model with `image_gen.model`. Recognized GPT models include `gpt-image-1`, `gpt-image-1.5`,
+`gpt-image-2`, `gpt-image-2.5`, `gpt-image-2.5-flare`, and `gpt-image-2.5-sunburst`.
+These names indicate what the plugin can forward, not guaranteed availability on your gateway or account.
 
-画质后缀优先于 `quality` 设置，例如 `gpt-image-2-high` 会发送
-`model: gpt-image-2` 和 `quality: high`。实际支持的画质由网关和上游决定。
-其他网关模型名称原样传递，不附加 GPT 专用的尺寸、画质和流式参数。
+A quality suffix overrides the `quality` setting: `gpt-image-2.5-flare-high` sends
+`model: gpt-image-2.5-flare` and `quality: high`. Actual quality support depends on the gateway and upstream.
+Other gateway model IDs are forwarded verbatim without GPT-specific size, quality, or streaming parameters.
 
-## 请求与响应
+## Requests and responses
 
-GPT 图片模型的文生图请求示例：
+Example text-to-image request for a GPT image model:
 
 ```json
 {
-  "model": "gpt-image-2",
-  "prompt": "一只布偶小猫讲解如何做包子",
+  "model": "gpt-image-2.5-flare",
+  "prompt": "A ragdoll kitten explaining how to make steamed buns",
   "n": 1,
   "size": "auto",
   "quality": "auto",
@@ -90,38 +99,38 @@ GPT 图片模型的文生图请求示例：
 }
 ```
 
-`quality: auto` 是上述配置的示例，并非插件强制使用的画质。
-`stream`、`partial_images` 和 GPT 模型的 `size` 当前是固定请求行为。
+`quality: auto` follows the example configuration, rather than being forced by the plugin.
+`stream`, `partial_images`, and the GPT request `size` are currently fixed request behaviors.
 
-- 无参考图片时调用 `/images/generations`；提供参考图片时调用 `/images/edits`。
-- 忽略 keepalive 保活事件，接收并保存最多 2 张 partial_image 预览图。
-- 接收 completed 事件后保存最终图片；没有预览图也可以成功。
-- 流提前结束且没有最终图片时返回错误，不把预览图误当成成品。
-- 结果包含 `partial_images` 预览路径、`requested_size`、`requested_quality` 和实际 `output_size`。
+- Without references, call `/images/generations`; with references, call `/images/edits`.
+- Ignore keepalive events and save up to 2 partial_image previews.
+- Save the final image on the completed event. A stream without previews can still succeed.
+- Return an error if the stream ends without a completed image; never treat a preview as the final result.
+- Include preview paths in `partial_images`, along with `requested_size`, `requested_quality`, and actual `output_size`.
 
-`partial_images: 2` 不代表生成两张成品，成品数量仍由 `n: 1` 控制。
-图片通过 Hermes 的保存函数写入 `$HERMES_HOME/cache/generated/images/`。
+`partial_images: 2` does not request two finished images; the final count remains `n: 1`.
+Images are saved through Hermes helpers under `$HERMES_HOME/cache/generated/images/`.
 
-## 限制与安全边界
+## Limitations and security boundaries
 
-- **不自动降级或重发**：GPT 流式请求失败后不会自动改成非流式请求。
-  SDK 自动重试也已关闭；人工重新生成仍可能产生额外费用。
-- **尺寸自动选择**：GPT 请求使用 `size: auto`，`aspect_ratio` 保留为结果元数据，
-  不再映射为固定请求尺寸。可在提示词中描述构图，但不能保证精确宽高比。
-- **超时**：SDK 超时为每次网络操作 240 秒，不是整个生成过程的总时限；
-  网关、代理或上游仍可能提前终止连接。
-- **参考图片**：支持本地文件、图片 data URL 和公开 HTTPS 地址，最多 16 张。
-  HTTPS 来源使用 Hermes 的 SSRF 防护、禁用重定向、检查图片文件签名，并限制为 50 MB。
-- **网关连接**：默认要求 HTTPS；纯 HTTP 仅允许所有解析地址都位于明确支持的
-  回环、局域网、CGNAT/Tailscale 或 IPv6 ULA 网络，拒绝公网与元数据地址。
-- **输出 URL**：网关返回的图片 URL 由 Hermes 标准下载函数处理，
-  与参考图片的严格 URL 加载器不是同一安全边界。只连接可信网关。
-- **密钥隔离**：不读写聊天使用的 `OPENAI_API_KEY` 或 `OPENAI_BASE_URL`，
-  不向网关转发 OpenAI 组织或项目标识，错误信息中的密钥会脱敏。
+- **No automatic fallback or resend:** failed GPT streams are not retried as non-streaming requests.
+  SDK retries are also disabled. Manually generating again can still incur additional charges.
+- **Automatic dimensions:** GPT requests use `size: auto`. `aspect_ratio` remains result metadata,
+  rather than determining a fixed request size. You can describe composition in the prompt, but exact ratios are not guaranteed.
+- **Timeout:** the SDK timeout is 240 seconds per network operation, not a total generation deadline.
+  Your gateway, proxy, or upstream may terminate a connection earlier.
+- **Reference images:** local files, image data URLs, and public HTTPS URLs are supported, up to 16 references.
+  HTTPS loading uses Hermes SSRF protection, disables redirects, checks image signatures, and enforces a 50 MB limit.
+- **Gateway connections:** HTTPS is required by default. Plain HTTP is allowed only when all resolved
+  addresses are in explicitly supported loopback, LAN, CGNAT/Tailscale, or IPv6 ULA networks; public and metadata addresses are refused.
+- **Output URLs:** gateway-provided image URLs use the standard Hermes downloader, which has a different
+  security boundary from the strict reference-image loader. Connect only to a gateway you trust.
+- **Credential isolation:** the plugin does not read or write chat's `OPENAI_API_KEY` or `OPENAI_BASE_URL`,
+  does not forward OpenAI organization or project IDs, and redacts credentials in error messages.
 
-## 开发与验证
+## Development and validation
 
-在具有 Hermes 运行依赖的 Python 环境中运行：
+Run in a Python environment with the Hermes runtime dependencies installed:
 
 ```bash
 PYTHONPATH=/path/to/hermes-agent PYTHONDONTWRITEBYTECODE=1 \
@@ -130,18 +139,18 @@ hermes plugins doctor . --ci
 hermes plugins validate .
 ```
 
-本地修改版本已通过 46 项自动化测试、插件验证与 Plugin Doctor，
-并完成已捕获真实 SSE 响应的离线回放，解码后的最终图片内容一致。
-测试覆盖文生图、参考图片编辑、预览图、保活、提前结束、错误脱敏、
-资源关闭，以及非 GPT 模型的原有 JSON 路径。
+The local modified version passed 46 automated tests, plugin validation, and Plugin Doctor.
+An offline replay of a captured real SSE response also reproduced the final image exactly.
+Tests cover generation, editing, previews, keepalives, early termination, error redaction,
+resource cleanup, and the existing non-GPT JSON route.
 
-这些结果不代表所有网关都已完成在线兼容性测试。`scripts/live_e2e.py`
-可以进行在线检查，但会调用实际生成接口并可能产生费用，不应无授权运行。
+These checks do not prove online compatibility with every gateway. `scripts/live_e2e.py` can perform
+live checks, but invokes actual image endpoints and can incur charges; do not run it without authorization.
 
-## 致谢与许可证
+## Credits and license
 
-感谢 [duu261/hermes-imagegen-openai-compatible](https://github.com/duu261/hermes-imagegen-openai-compatible)
-提供原始实现。本 fork 的主要修改是 GPT 图片请求的流式处理、预览图保存和相关测试。
+Thanks to [duu261/hermes-imagegen-openai-compatible](https://github.com/duu261/hermes-imagegen-openai-compatible)
+for the original implementation. This fork primarily adds GPT image streaming, preview saving, and related tests.
 
-采用 MIT 许可证，原项目的版权声明保留在 [LICENSE](LICENSE) 中。
-更新记录见 [CHANGELOG.md](CHANGELOG.md)。
+MIT licensed. The original copyright notice is retained in [LICENSE](LICENSE).
+See [CHANGELOG.md](CHANGELOG.md) for changes.
