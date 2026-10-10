@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.4
+
+- Distinguish explicit upstream safety rejections from authentication errors and unknown empty results.
+- Return safe alternative-prompt guidance to Hermes without retrying or disguising rejected content.
+- Surface failed/error/incomplete stream events and actionable empty-result, timeout and connection messages.
+- Document prompt preflight recommendations without adding a keyword blacklist or unverified moderation calls.
+- Keep gateway settings, credentials and generation request parameters unchanged.
+
 ## 2.0.3
 
 - Introduce the `aluvien/hermes-imagegen-openai-stream` fork and streaming-focused documentation.

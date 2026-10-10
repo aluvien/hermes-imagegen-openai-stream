@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover - older Hermes
 logger = logging.getLogger(__name__)
 
 PLUGIN_NAME = "openai-compatible"
-PLUGIN_VERSION = "2.0.3"
+PLUGIN_VERSION = "2.0.4"
 USER_AGENT = f"hermes-imagegen-openai-stream/{PLUGIN_VERSION}"
 
 DEFAULT_MODEL = "gpt-image-2"
@@ -272,18 +272,51 @@ def _redact(text: str, secrets: List[str]) -> str:
     return text[:MAX_ERROR_CHARS] + ("..." if len(text) > MAX_ERROR_CHARS else "")
 
 
+def _gateway_error(payload: Any, secrets: List[str]) -> Tuple[str, bool]:
+    if hasattr(payload, "model_dump"):
+        payload = payload.model_dump()
+    elif hasattr(payload, "__dict__"):
+        payload = vars(payload)
+    if not isinstance(payload, dict):
+        message = _redact(str(payload or ""), secrets)
+        payload = {}
+    else:
+        nested = payload.get("error")
+        if nested:
+            message, blocked = _gateway_error(nested, secrets)
+            if blocked:
+                return message, True
+        else:
+            message = ""
+        message = message or _redact(str(payload.get("message") or payload.get("error_name")
+                                       or payload.get("title") or ""), secrets)
+    codes = {str(payload.get(name) or "").lower() for name in ("code", "type")}
+    blocked = bool(codes & {"moderation_blocked", "content_policy_violation", "safety_violation",
+                            "content_filter", "content_filter_error"})
+    blocked = blocked or any(marker in message.lower() for marker in (
+        "rejected by the safety system", "blocked by a safety check", "content policy violation",
+        "content_policy_violation", "moderation_blocked", "违反内容政策", "内容审核拒绝"))
+    return message or "Gateway reported an image generation failure", blocked
+
+
 def _status_error(exc: Any, secrets: List[str]) -> Tuple[str, str]:
     """``(error, error_type)`` for an ``openai.APIStatusError``."""
     status = getattr(exc, "status_code", 0) or 0
     body = getattr(exc, "body", None)
     message = ""
     if isinstance(body, dict):
+        blocked_message, blocked = _gateway_error(body, secrets)
+        if blocked:
+            return f"HTTP {status}: {blocked_message}", "content_policy_violation"
         inner = body["error"] if isinstance(body.get("error"), dict) else body
         message = str(inner.get("message") or inner.get("error_name") or inner.get("title") or "")
     if not message:
         response = getattr(exc, "response", None)
         message = getattr(response, "text", "") or getattr(exc, "message", "") or ""
     message = _redact(str(message), secrets)
+    blocked_message, blocked = _gateway_error({"code": getattr(exc, "code", None), "message": message}, secrets)
+    if blocked:
+        return f"HTTP {status}: {blocked_message}", "content_policy_violation"
     hint = ""
     if status == 403 and ("1010" in message or "browser_signature_banned" in message):
         hint = " (Cloudflare blocked the client signature; check the gateway's WAF rules)"
@@ -395,6 +428,21 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
         api_model, quality = _resolve_model(label, self._setting("quality"))
 
         def fail(error: str, error_type: str) -> Dict[str, Any]:
+            if error_type == "content_policy_violation":
+                error += (
+                    " No final image was generated: the gateway reported a safety rejection of the input "
+                    "or generated output. Explain this to the user and offer a genuinely safe alternative "
+                    "prompt in their language, preserving only benign subject, style and composition. "
+                    "Remove prohibited content rather than disguising it or bypassing safeguards. "
+                    "Safe fallback prompt: 'A peaceful illustrated landscape with trees, warm sunlight "
+                    "and soft colors, suitable for a general audience.' Do not automatically retry the "
+                    "rejected prompt; ask the user to approve the revised prompt first.")
+            elif error_type in ("empty_response", "invalid_response"):
+                error += (
+                    " No usable final image was received; the cause is unknown, not confirmed as a safety "
+                    "rejection. Suggest reviewing the prompt and reference images for safety and clarity, "
+                    "then retrying with the user's approval. If it happens again, check gateway logs and "
+                    "streaming support. A retry may incur additional charges; do not retry automatically.")
             return error_response(error=error, error_type=error_type, provider=PLUGIN_NAME,
                                   model=label, prompt=prompt, aspect_ratio=aspect)
 
@@ -463,9 +511,12 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
                     try:
                         for event in response:
                             event_type = getattr(event, "type", "")
-                            if event_type == "error" or getattr(event, "error", None):
-                                raise ValueError(str(getattr(event, "error", None)
-                                                     or getattr(event, "message", "Image stream failed")))
+                            if (event_type == "error"
+                                    or event_type.endswith((".failed", ".error", ".incomplete"))
+                                    or getattr(event, "error", None)):
+                                message, blocked = _gateway_error(event, secrets)
+                                return fail(f"Image stream failed: {message}",
+                                            "content_policy_violation" if blocked else "api_error")
                             if event_type == partial_type and len(partial_images) < 2:
                                 preview = getattr(event, "b64_json", None)
                                 if preview:
@@ -485,16 +536,23 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
             error, error_type = _status_error(exc, secrets)
             return fail(error, error_type)
         except openai.APITimeoutError:
-            return fail("Gateway request timed out", "timeout")
+            return fail("Gateway request timed out; no final image was received. Check the gateway/network "
+                        "and retry only with the user's approval; a retry may incur additional charges.", "timeout")
         except openai.APIConnectionError:
-            return fail(f"Could not connect to the gateway at {base_url}", "connection_error")
+            return fail(f"Gateway connection failed or was interrupted at {base_url}; no final image was received. "
+                        "Check the gateway/network and retry only with the user's approval; "
+                        "a retry may incur additional charges.", "connection_error")
         except Exception as exc:  # noqa: BLE001 - surface the category, never raw config
+            message, blocked = _gateway_error(getattr(exc, "body", None) or {
+                "code": getattr(exc, "code", None), "message": str(exc)}, secrets)
+            if blocked:
+                return fail(message, "content_policy_violation")
             # No exc_info: header/URL errors can carry the key in their traceback.
             logger.debug("%s image request failed: %s", PLUGIN_NAME, type(exc).__name__)
             return fail(f"Image request failed ({type(exc).__name__}): {_redact(str(exc), secrets)}", "api_error")
 
         if item is None:
-            return fail("Gateway returned no completed image; the stream may have ended early", "empty_response")
+            return fail("Gateway returned no completed image; the stream may have ended early or the image data was empty.", "empty_response")
         b64_data = getattr(item, "b64_json", None)
         url_data = getattr(item, "url", None)
         try:

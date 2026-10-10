@@ -347,6 +347,43 @@ class ProviderTests(unittest.TestCase):
         self.assertTrue(FakeClient.instances[0].closed)
         self.assertTrue(FakeClient.instances[0].images.stream.closed)
 
+    def test_stream_safety_rejection_in_nested_error(self):
+        FakeClient.events = [types.SimpleNamespace(type="image_generation.failed", error={
+            "code": "moderation_blocked", "message": "Request refused test-key-123456"})]
+        result = self.make().generate("draw", model="gpt-image-2")
+        self.assertEqual(result["error_type"], "content_policy_violation")
+        self.assertIn("Safe fallback prompt:", result["error"])
+        self.assertIn("approve the revised prompt", result["error"])
+        self.assertNotIn("test-key-123456", result["error"])
+        self.assertTrue(FakeClient.instances[0].images.stream.closed)
+        self.assertTrue(FakeClient.instances[0].closed)
+
+    def test_failed_stream_events_are_not_silent_empty_results(self):
+        for event_type in ("image_generation.failed", "image_edit.error", "image_generation.incomplete"):
+            with self.subTest(event_type=event_type):
+                FakeClient.events = [types.SimpleNamespace(type=event_type, message="Render failed")]
+                result = self.make().generate("draw", model="gpt-image-2")
+                self.assertEqual(result["error_type"], "api_error")
+                self.assertIn("Render failed", result["error"])
+                self.assertTrue(FakeClient.instances[-1].images.stream.closed)
+
+    def test_empty_stream_has_unknown_cause_and_retry_guidance(self):
+        FakeClient.events = []
+        result = self.make().generate("draw", model="gpt-image-2")
+        self.assertEqual(result["error_type"], "empty_response")
+        self.assertIn("not confirmed as a safety rejection", result["error"])
+        self.assertIn("reviewing the prompt", result["error"])
+        self.assertIn("do not retry automatically", result["error"])
+
+    def test_sdk_stream_exception_preserves_safety_code(self):
+        failure = Exception("Stream rejected test-key-123456")
+        failure.body = {"code": "moderation_blocked", "message": str(failure)}
+        FakeClient.events = [failure]
+        result = self.make().generate("draw", model="gpt-image-2")
+        self.assertEqual(result["error_type"], "content_policy_violation")
+        self.assertNotIn("test-key-123456", result["error"])
+        self.assertTrue(FakeClient.instances[0].images.stream.closed)
+
     def test_completed_event_without_image_is_invalid(self):
         FakeClient.events = [types.SimpleNamespace(type="image_generation.completed")]
         result = self.make().generate("draw", model="gpt-image-2")
@@ -392,6 +429,34 @@ class ProviderTests(unittest.TestCase):
                 if not is_edit:
                     payload = json.loads(requests[0].content)
                     self.assertEqual((payload["stream"], payload["partial_images"], payload["size"]), (True, 2, "auto"))
+
+    def test_real_sdk_handles_http_and_sse_safety_rejections(self):
+        import httpx
+        constructor = real_openai.OpenAI
+        for status in (200, 400, 403):
+            with self.subTest(status=status):
+                error = {"code": "moderation_blocked", "message": "Safety refusal test-key-123456"}
+                requests = []
+
+                def handler(request):
+                    requests.append(request)
+                    if status == 200:
+                        event = {"type": "error", "error": error}
+                        return httpx.Response(200, headers={"Content-Type": "text/event-stream"},
+                                              text="event: error\ndata: " + json.dumps(event) + "\n\n")
+                    return httpx.Response(status, json={"error": error})
+
+                def factory(**kwargs):
+                    return constructor(http_client=httpx.Client(transport=httpx.MockTransport(handler)), **kwargs)
+
+                with patch.dict(sys.modules, {"openai": real_openai}), \
+                        patch.object(real_openai, "OpenAI", side_effect=factory):
+                    result = self.make().generate("draw", model="gpt-image-2")
+                self.assertEqual(result["error_type"], "content_policy_violation", result)
+                self.assertIn("Safe fallback prompt:", result["error"])
+                self.assertNotIn("test-key-123456", result["error"])
+                self.assertFalse(result["success"])
+                self.assertEqual(len(requests), 1)
 
     def test_openai_org_and_project_env_never_sent_to_gateway(self):
         with patch.dict(os.environ, {"OPENAI_ORG_ID": "org-x", "OPENAI_PROJECT_ID": "proj-x"}):
@@ -537,6 +602,32 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(result["error_type"], "auth_error")
         self.assertNotIn("test-key-123456", result["error"])
         self.assertNotIn("abc.def", result["error"])
+
+    def test_http_safety_codes_override_auth_classification(self):
+        for status in (400, 403):
+            for code in ("moderation_blocked", "content_policy_violation"):
+                with self.subTest(status=status, code=code):
+                    FakeClient.raise_exc = FakeAPIStatusError(status, {"error": {
+                        "code": code, "message": "Safety refusal test-key-123456"}})
+                    result = self.make().generate("draw")
+                    self.assertEqual(result["error_type"], "content_policy_violation")
+                    self.assertIn(f"HTTP {status}", result["error"])
+                    self.assertIn("Safe fallback prompt:", result["error"])
+                    self.assertNotIn("test-key-123456", result["error"])
+
+    def test_explicit_safety_message_without_code(self):
+        FakeClient.raise_exc = FakeAPIStatusError(400, {
+            "message": "Your request was rejected by the safety system."})
+        self.assertEqual(self.make().generate("draw")["error_type"], "content_policy_violation")
+
+    def test_generic_moderation_configuration_error_is_not_a_refusal(self):
+        FakeClient.raise_exc = FakeAPIStatusError(400, {"error": {
+            "message": "Unsupported moderation parameter", "code": "invalid_argument"}})
+        self.assertEqual(self.make().generate("draw")["error_type"], "api_error")
+
+    def test_generic_permission_denial_is_still_auth_error(self):
+        FakeClient.raise_exc = FakeAPIStatusError(403, {"error": {"message": "Permission denied"}})
+        self.assertEqual(self.make().generate("draw")["error_type"], "auth_error")
 
     def test_cloudflare_1010_hint(self):
         FakeClient.raise_exc = FakeAPIStatusError(403, None, "error code: 1010")

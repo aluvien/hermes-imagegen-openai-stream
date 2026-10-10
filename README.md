@@ -229,6 +229,27 @@ Images are saved through Hermes helpers under `$HERMES_HOME/cache/generated/imag
 - **Credential isolation:** the plugin does not read or write chat's `OPENAI_API_KEY` or `OPENAI_BASE_URL`,
   does not forward OpenAI organization or project IDs, and redacts credentials in error messages.
 
+## Safety refusals and empty results
+
+- Explicit upstream safety codes (including `moderation_blocked` and `content_policy_violation`)
+  are returned to Hermes as `content_policy_violation`, including for HTTP 403 or a failed stream.
+- The error asks Hermes to explain the refusal and offer a genuinely safe alternative in the user's
+  language, preserving only benign subject/style/composition. A generic peaceful-landscape prompt is
+  included as a fallback, not a personalized rewrite or a guarantee of approval. Either the input
+  or generated output may have triggered moderation; the plugin does not assume which one.
+- An empty or incomplete image result remains `empty_response` or `invalid_response`, not proof of
+  a safety violation. Hermes is advised to review the prompt/reference images and suggest retrying
+  with user approval; repeated failures warrant checking gateway logs and streaming support.
+- Failed/error/incomplete stream events preserve upstream error messages with credentials redacted.
+  No automatic rewrite, resubmission or retry is performed; retries may incur additional charges.
+- **Recommended preflight:** Hermes should review the prompt and references before calling the tool
+  and ask the user to approve a safe revision when needed. This is an agent workflow recommendation,
+  not an automatic preflight detector installed by this plugin. The plugin has no keyword blacklist
+  and makes no separate moderation API calls. Image-generation safety checks do not guarantee a
+  preflight decision or a complete refusal response through a third-party gateway. A separate
+  Moderation API integration requires verifying that the configured gateway supports it; do not
+  assume that a Codex-backed image route exposes that endpoint.
+
 ## Development and validation
 
 Run in a Python environment with the Hermes runtime dependencies installed:
@@ -240,7 +261,7 @@ hermes plugins doctor . --ci
 hermes plugins validate .
 ```
 
-The local modified version passed 46 automated tests, plugin validation, and Plugin Doctor.
+The local modified version passed 55 automated tests, plugin validation, and Plugin Doctor.
 An offline replay of a captured real SSE response also reproduced the final image exactly.
 Tests cover generation, editing, previews, keepalives, early termination, error redaction,
 resource cleanup, and the existing non-GPT JSON route.
