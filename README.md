@@ -10,15 +10,16 @@ It retains the original gateway configuration, isolated credentials, error categ
 editing, while adding streaming requests for GPT image models with saved intermediate previews and final images.
 
 Use it with CLIProxyAPI, New API, or another gateway that supports streaming Images endpoints.
-**Support for non-streaming Images requests does not imply SSE support. Check both your gateway and upstream.**
+**SSE previews require gateway/upstream streaming support. Version 2.0.5 also accepts a complete JSON image response to the same streaming request.**
 
 ## What changed from the original plugin?
 
-This comparison uses upstream **2.0.2** as the baseline. This fork is currently **2.0.4**.
+This comparison uses upstream **2.0.2** as the baseline. The working-tree version is **2.0.5**;
+the pinned migration example below still targets the previously published **2.0.4** revision.
 
 | Feature | Original 2.0.2 | This fork |
 |---|---|---|
-| GPT image requests | Wait for a complete JSON response | Consume SSE events |
+| GPT image requests | Wait for a complete JSON response | Consume SSE events or a complete JSON response from the same request |
 | Intermediate previews | Not requested | Request and save up to 2 |
 | Image dimensions | Fixed size derived from aspect ratio | `size: auto`, chosen by the backend |
 | Final image parsing | JSON `data[0]` | Stream completed event |
@@ -239,6 +240,19 @@ Images are saved through Hermes helpers under `$HERMES_HOME/cache/generated/imag
 
 ## Safety refusals and empty results
 
+### JSON response compatibility (2.0.5)
+
+Some gateways return a complete JSON `data[0].b64_json` image despite `stream: true`, sometimes
+even labeling it `text/event-stream`. The plugin detects the actual body format and accepts either
+SSE or complete JSON without resending the request. `response_format` reports `sse` or `json`;
+`stream: true` in the result describes the requested mode, not proof that the gateway streamed.
+JSON responses have no intermediate previews. Malformed responses remain errors, and a JSON body
+or single SSE event exceeding 64 MiB is rejected. Request parameters and existing settings stay unchanged.
+An offline replay of a captured JSON response with a misleading SSE header recovered exactly the
+same image bytes through the real SDK and one mock request; no paid request was repeated.
+
+### Error guidance
+
 - Explicit upstream safety codes (including `moderation_blocked` and `content_policy_violation`)
   are returned to Hermes as `content_policy_violation`, including for HTTP 403 or a failed stream.
 - The error asks Hermes to explain the refusal and offer a genuinely safe alternative in the user's
@@ -269,7 +283,7 @@ hermes plugins doctor . --ci
 hermes plugins validate .
 ```
 
-The local modified version passed 55 automated tests, plugin validation, and Plugin Doctor.
+The local modified version passed 65 automated tests, plugin validation, and Plugin Doctor.
 An offline replay of a captured real SSE response also reproduced the final image exactly.
 Tests cover generation, editing, previews, keepalives, early termination, error redaction,
 resource cleanup, and the existing non-GPT JSON route.

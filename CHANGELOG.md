@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.5
+
+- Read GPT image responses through the SDK's public raw streaming interface, accepting SSE or ordinary JSON from the same request.
+- Recover final images when gateways return JSON despite `stream: true`, even with a misleading SSE content type.
+- Preserve streaming previews, explicit safety errors, resource cleanup and the existing non-GPT JSON route.
+- Report actual `response_format` (`sse` or `json`) and reject malformed/oversized response payloads.
+- Never retry, resend or change generation parameters for response-format compatibility.
+
 ## 2.0.4
 
 - Distinguish explicit upstream safety rejections from authentication errors and unknown empty results.

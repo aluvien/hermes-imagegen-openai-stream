@@ -77,12 +77,27 @@ class FakeStream:
     def close(self):
         self.closed = True
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def iter_lines(self):
+        for event in self:
+            yield "data: " + json.dumps(vars(event))
+            yield ""
+
 
 class FakeImages:
     def __init__(self, raise_exc=None):
         self.generate_calls = []
         self.edit_calls = []
         self.raise_exc = raise_exc
+
+    @property
+    def with_streaming_response(self):
+        return self
 
     def _respond(self, kwargs, kind):
         if self.raise_exc is not None:
@@ -457,6 +472,109 @@ class ProviderTests(unittest.TestCase):
                 self.assertNotIn("test-key-123456", result["error"])
                 self.assertFalse(result["success"])
                 self.assertEqual(len(requests), 1)
+
+    def wire_result(self, body, content_type="text/event-stream", is_edit=True, content_encoding=None):
+        import httpx
+        constructor = real_openai.OpenAI
+        requests = []
+        transports = []
+
+        def handler(request):
+            requests.append(request)
+            headers = {"Content-Type": content_type}
+            if content_encoding:
+                headers["Content-Encoding"] = content_encoding
+            return httpx.Response(200, headers=headers, content=body)
+
+        def factory(**kwargs):
+            client = httpx.Client(transport=httpx.MockTransport(handler))
+            transports.append(client)
+            return constructor(http_client=client, **kwargs)
+
+        with patch.dict(sys.modules, {"openai": real_openai}), \
+                patch.object(real_openai, "OpenAI", side_effect=factory):
+            kwargs = {"image_url": "data:image/png;base64," + FakeImage.b64_json} if is_edit else {}
+            result = self.make().generate("draw", model="gpt-image-2", **kwargs)
+        self.assertEqual(len(requests), 1)
+        self.assertTrue(all(client.is_closed for client in transports))
+        return result, requests[0]
+
+    def test_json_image_response_with_correct_or_misleading_content_type(self):
+        body = json.dumps({"data": [{"b64_json": FakeImage.b64_json}]}, indent=2).encode()
+        for content_type in ("application/json", "text/event-stream", "text/plain"):
+            for is_edit in (True, False):
+                with self.subTest(content_type=content_type, is_edit=is_edit):
+                    result, request = self.wire_result(body, content_type, is_edit)
+                    self.assertTrue(result["success"], result)
+                    self.assertEqual(result["response_format"], "json")
+                    self.assertEqual(result["partial_images"], [])
+                    self.assertEqual(request.url.path, "/v1/images/edits" if is_edit else "/v1/images/generations")
+                    self.assertIn(b"stream", request.content)
+                    self.assertIn(b"partial_images", request.content)
+
+    def test_gzip_json_response_and_utf8_bom(self):
+        import gzip
+        body = b"\xef\xbb\xbf  \n" + json.dumps({"data": [{"b64_json": FakeImage.b64_json}]}).encode()
+        result, _ = self.wire_result(gzip.compress(body), content_encoding="gzip")
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["response_format"], "json")
+
+    def test_json_fallback_errors_are_redacted_and_classified(self):
+        for code, expected in (("moderation_blocked", "content_policy_violation"), ("server_error", "api_error")):
+            with self.subTest(code=code):
+                body = json.dumps({"error": {"code": code, "message": "Refused test-key-123456"}}).encode()
+                result, _ = self.wire_result(body)
+                self.assertEqual(result["error_type"], expected)
+                self.assertNotIn("test-key-123456", result["error"])
+
+    def test_empty_json_fallback_is_not_success(self):
+        for body in (b"{}", b'{"data": []}', b""):
+            with self.subTest(body=body):
+                result, _ = self.wire_result(body)
+                self.assertEqual(result["error_type"], "empty_response")
+
+    def test_malformed_json_fallback_is_invalid_response(self):
+        for body in (b'{"data":', b"[]", b'{"data": [null]}', b'{"data": [{}]}', b'{"data": "bad"}'):
+            with self.subTest(body=body):
+                result, _ = self.wire_result(body)
+                self.assertEqual(result["error_type"], "invalid_response")
+
+    def test_sse_comments_multiline_data_and_event_name_fallback(self):
+        body = (": keepalive\r\n\r\nevent: image_edit.completed\r\n"
+                'data: {\r\ndata: "b64_json": "' + FakeImage.b64_json + '"\r\ndata: }\r\n')
+        result, _ = self.wire_result(body.encode())
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["response_format"], "sse")
+
+    def test_done_or_preview_only_sse_still_requires_final_image(self):
+        for body in (b"data: [DONE]\n\n", b": keepalive\n\n", (
+                'data: ' + json.dumps({"type": "image_edit.partial_image", "b64_json": FakeImage.b64_json})
+                + '\n\ndata: [DONE]\n\n').encode()):
+            with self.subTest(body=body[:40]):
+                result, _ = self.wire_result(body)
+                self.assertEqual(result["error_type"], "empty_response")
+
+    def test_malformed_sse_is_invalid_response(self):
+        result, _ = self.wire_result(b"data: {not-json}\n\n")
+        self.assertEqual(result["error_type"], "invalid_response")
+
+    def test_oversized_json_and_sse_payloads_are_rejected(self):
+        payload = json.dumps({"data": [{"b64_json": FakeImage.b64_json}]}).encode()
+        for body in (payload, b"data: " + payload + b"\n\n"):
+            with self.subTest(body=body[:20]), patch.object(provider, "MAX_IMAGE_RESPONSE_BYTES", 64):
+                result, _ = self.wire_result(body)
+                self.assertEqual(result["error_type"], "invalid_response")
+                self.assertIn("exceeds", result["error"])
+
+    def test_raw_httpx_stream_failures_keep_timeout_or_connection_category(self):
+        import httpx
+        for failure, expected in ((httpx.ReadTimeout("slow"), "timeout"),
+                                  (httpx.ReadError("disconnected"), "connection_error")):
+            with self.subTest(expected=expected):
+                FakeClient.events = [failure]
+                result = self.make().generate("draw", model="gpt-image-2")
+                self.assertEqual(result["error_type"], expected)
+                self.assertTrue(FakeClient.instances[-1].images.stream.closed)
 
     def test_openai_org_and_project_env_never_sent_to_gateway(self):
         with patch.dict(os.environ, {"OPENAI_ORG_ID": "org-x", "OPENAI_PROJECT_ID": "proj-x"}):

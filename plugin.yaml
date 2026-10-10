@@ -1,5 +1,5 @@
 name: openai-compatible
-version: 2.0.4
+version: 2.0.5
 manifest_version: 2
 requires_hermes: ">=0.20.1"
 description: Streaming GPT image generation and editing through OpenAI-compatible gateways, with saved partial previews

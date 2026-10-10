@@ -10,13 +10,16 @@ from __future__ import annotations
 import base64
 import io
 import ipaddress
+import json
 import logging
 import os
 import re
 import socket
 import struct
+from itertools import chain
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from types import SimpleNamespace
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from agent.image_gen_provider import (
@@ -39,7 +42,7 @@ except ImportError:  # pragma: no cover - older Hermes
 logger = logging.getLogger(__name__)
 
 PLUGIN_NAME = "openai-compatible"
-PLUGIN_VERSION = "2.0.4"
+PLUGIN_VERSION = "2.0.5"
 USER_AGENT = f"hermes-imagegen-openai-stream/{PLUGIN_VERSION}"
 
 DEFAULT_MODEL = "gpt-image-2"
@@ -62,6 +65,7 @@ DEFAULT_QUALITY = "medium"
 
 MAX_SOURCE_IMAGE_BYTES = 50 * 1024 * 1024
 MAX_ERROR_CHARS = 300
+MAX_IMAGE_RESPONSE_BYTES = 64 * 1024 * 1024
 LOCAL_HTTP_HOSTS = {"localhost", "127.0.0.1", "::1"}
 # Plain-HTTP gateways are allowed only when EVERY resolved address is inside these networks:
 # loopback, RFC 1918 LAN / Docker bridges, CGNAT 100.64.0.0/10 (Tailscale), IPv6 ULA (incl.
@@ -272,6 +276,76 @@ def _redact(text: str, secrets: List[str]) -> str:
     return text[:MAX_ERROR_CHARS] + ("..." if len(text) > MAX_ERROR_CHARS else "")
 
 
+class ResponseFormatError(ValueError):
+    pass
+
+
+def _parse_image_event(data: str, event_type: str) -> Any:
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError:
+        raise ResponseFormatError("Gateway returned malformed image response JSON") from None
+    if not isinstance(payload, dict):
+        raise ResponseFormatError("Gateway returned an image response that is not a JSON object")
+    payload.setdefault("type", event_type)
+    return SimpleNamespace(**payload)
+
+
+def _iter_image_events(response: Any, completed_type: str) -> Iterator[Tuple[str, Any]]:
+    lines = iter(response.iter_lines())
+    first = next((line.lstrip("\ufeff") for line in lines if line.strip("\ufeff \t\r\n")), None)
+    if first is None:
+        return
+    if first.lstrip().startswith(("{", "[")):
+        parts = [first]
+        total = len(first.encode("utf-8"))
+        for line in lines:
+            total += len(line.encode("utf-8")) + 1
+            if total > MAX_IMAGE_RESPONSE_BYTES:
+                raise ResponseFormatError("Gateway JSON image response exceeds 64 MiB")
+            parts.append(line)
+        if total > MAX_IMAGE_RESPONSE_BYTES:
+            raise ResponseFormatError("Gateway JSON image response exceeds 64 MiB")
+        payload = vars(_parse_image_event("\n".join(parts), ""))
+        if payload.get("error") or payload.get("type") == "error":
+            payload["type"] = "error"
+            yield "json", SimpleNamespace(**payload)
+            return
+        data = payload.get("data")
+        if data is None or data == []:
+            return
+        if not isinstance(data, list) or not isinstance(data[0], dict):
+            raise ResponseFormatError("Gateway JSON image response has invalid image data")
+        item = dict(data[0])
+        item["type"] = completed_type
+        yield "json", SimpleNamespace(**item)
+        return
+    event_type = ""
+    data_lines: List[str] = []
+    event_bytes = 0
+    for line in chain([first], lines, [""]):
+        if not line:
+            if data_lines:
+                data = "\n".join(data_lines)
+                if data.strip() == "[DONE]":
+                    return
+                yield "sse", _parse_image_event(data, event_type)
+            event_type, data_lines, event_bytes = "", [], 0
+            continue
+        if line.startswith(":"):
+            continue
+        field, separator, value = line.partition(":")
+        if value.startswith(" "):
+            value = value[1:]
+        if field == "event":
+            event_type = value
+        elif field == "data" and separator:
+            event_bytes += len(value.encode("utf-8")) + 1
+            if event_bytes > MAX_IMAGE_RESPONSE_BYTES:
+                raise ResponseFormatError("Gateway SSE image event exceeds 64 MiB")
+            data_lines.append(value)
+
+
 def _gateway_error(payload: Any, secrets: List[str]) -> Tuple[str, bool]:
     if hasattr(payload, "model_dump"):
         payload = payload.model_dump()
@@ -449,6 +523,7 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
         if not prompt:
             return fail("Prompt is required and cannot be empty", "invalid_argument")
         try:
+            import httpx
             import openai
         except ImportError:
             return fail("openai Python package not installed (pip install 'openai>=2,<3')", "missing_dependency")
@@ -493,6 +568,7 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
 
         secrets = [api_key]
         partial_images: List[str] = []
+        response_format = "json"
         item = None
         try:
             # The SDK fills organization/project from OPENAI_ORG_ID / OPENAI_PROJECT_ID even when
@@ -504,12 +580,13 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
                 timeout=240.0, max_retries=0,
             ) as client:
                 call = client.images.edit if is_edit else client.images.generate
-                response = call(**request)
                 if quality is not None:
                     completed_type = "image_edit.completed" if is_edit else "image_generation.completed"
                     partial_type = "image_edit.partial_image" if is_edit else "image_generation.partial_image"
-                    try:
-                        for event in response:
+                    raw_images = client.images.with_streaming_response
+                    raw_call = raw_images.edit if is_edit else raw_images.generate
+                    with raw_call(**request) as response:
+                        for response_format, event in _iter_image_events(response, completed_type):
                             event_type = getattr(event, "type", "")
                             if (event_type == "error"
                                     or event_type.endswith((".failed", ".error", ".incomplete"))
@@ -527,21 +604,22 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
                             elif event_type == completed_type:
                                 item = event
                                 break
-                    finally:
-                        response.close()
                 else:
+                    response = call(**request)
                     data = getattr(response, "data", None) or []
                     item = data[0] if data else None
         except openai.APIStatusError as exc:
             error, error_type = _status_error(exc, secrets)
             return fail(error, error_type)
-        except openai.APITimeoutError:
+        except (openai.APITimeoutError, httpx.TimeoutException):
             return fail("Gateway request timed out; no final image was received. Check the gateway/network "
                         "and retry only with the user's approval; a retry may incur additional charges.", "timeout")
-        except openai.APIConnectionError:
+        except (openai.APIConnectionError, httpx.RequestError):
             return fail(f"Gateway connection failed or was interrupted at {base_url}; no final image was received. "
                         "Check the gateway/network and retry only with the user's approval; "
                         "a retry may incur additional charges.", "connection_error")
+        except ResponseFormatError as exc:
+            return fail(str(exc), "invalid_response")
         except Exception as exc:  # noqa: BLE001 - surface the category, never raw config
             message, blocked = _gateway_error(getattr(exc, "body", None) or {
                 "code": getattr(exc, "code", None), "message": str(exc)}, secrets)
@@ -568,7 +646,8 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
         extra: Dict[str, Any] = {"api_model": api_model}
         if quality is not None:
             extra.update(requested_size=size, requested_quality=quality)
-            extra.update(stream=True, requested_partial_images=2, partial_images=partial_images)
+            extra.update(stream=True, requested_partial_images=2, partial_images=partial_images,
+                         response_format=response_format)
         output_size = _file_dims(image_ref)
         if output_size:
             extra["output_size"] = output_size
