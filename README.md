@@ -14,7 +14,7 @@ Use it with CLIProxyAPI, New API, or another gateway that supports streaming Ima
 
 ## What changed from the original plugin?
 
-This comparison uses upstream **2.0.2** as the baseline. This fork is currently **2.0.3**.
+This comparison uses upstream **2.0.2** as the baseline. This fork is currently **2.0.4**.
 
 | Feature | Original 2.0.2 | This fork |
 |---|---|---|
@@ -88,15 +88,16 @@ the installer refuses replacement; handle that development install separately in
 ### 2. Install the verified fork revision
 
 ```bash
-hermes plugins install aluvien/hermes-imagegen-openai-stream --force --ref a452d4160e013338f7b81935a46d089ad1c0a1f5 --enable
+hermes plugins install aluvien/hermes-imagegen-openai-stream --force --ref d1c19d1da95d37d4da4b341383c36efa3a79f844 --enable
 ```
 
 This installs an explicit verified revision, not necessarily the newest commit on `main`.
-It works for switching both pinned and unpinned upstream installations. Review Hermes' dependency
+It works for switching both pinned and unpinned upstream installations and upgrading an older fork installation to 2.0.4. Review Hermes' dependency
 and security prompts. Do not use `--no-deps` to replace an active plugin.
 
 The plugin ID stays `openai-compatible`; keep your existing gateway URL, key variable, and credential.
-If you want the model used in this guide, set only these selections:
+If the same Hermes profile already uses this provider and model, no configuration changes are needed.
+Only if you want to change the selections to those used in this guide, run:
 
 ```bash
 hermes config set image_gen.provider openai-compatible
@@ -115,8 +116,8 @@ hermes config get image_gen.provider
 hermes config get image_gen.model
 ```
 
-Confirm the installed source is this fork, the pinned revision is `a452d416…`, and the plugin
-version is `2.0.3`. Close and reopen CLI sessions. If using the messaging gateway, run:
+Confirm the installed source is this fork, the pinned revision is `d1c19d1…`, and the plugin
+version is `2.0.4`. Close and reopen CLI sessions. If using the messaging gateway, run:
 
 ```bash
 hermes gateway restart
@@ -126,6 +127,13 @@ This restarts the affected gateway; schedule it when interrupting active work is
 Loading successfully does not prove your gateway supports SSE. An actual generation test may incur charges.
 
 ### Subsequent updates and rollback
+
+To upgrade an existing installation to **2.0.4**, back it up first, run the pinned install command
+in step 2 above, then verify and reload as described in step 3. This install command also works in
+Windows PowerShell; the Bash backup script above is for macOS/Linux/WSL, not native PowerShell.
+On native Windows, back up the active profile's plugin directory, configuration, credential file and
+install metadata using your usual local backup method before replacing the plugin. Use the same
+Hermes profile for every command. Do not upload credential backups.
 
 The migration command pins the installation. To upgrade later, repeat the fork install command with
 `--force --ref` and a new verified full SHA. A plain update will not move a pinned installation.
