@@ -14,8 +14,7 @@ Use it with CLIProxyAPI, New API, or another gateway that supports streaming Ima
 
 ## What changed from the original plugin?
 
-This comparison uses upstream **2.0.2** as the baseline. The working-tree version is **2.0.5**;
-the pinned migration example below still targets the previously published **2.0.4** revision.
+This comparison uses upstream **2.0.2** as the baseline. This fork is currently **2.0.5**.
 
 | Feature | Original 2.0.2 | This fork |
 |---|---|---|
@@ -89,11 +88,11 @@ the installer refuses replacement; handle that development install separately in
 ### 2. Install the verified fork revision
 
 ```bash
-hermes plugins install aluvien/hermes-imagegen-openai-stream --force --ref d1c19d1da95d37d4da4b341383c36efa3a79f844 --enable
+hermes plugins install aluvien/hermes-imagegen-openai-stream --force --ref ffdbf3558c12e02080f9a0cfd824b4385a945982 --enable
 ```
 
 This installs an explicit verified revision, not necessarily the newest commit on `main`.
-It works for switching both pinned and unpinned upstream installations and upgrading an older fork installation to 2.0.4. Review Hermes' dependency
+It works for switching both pinned and unpinned upstream installations and upgrading an older fork installation to 2.0.5. Review Hermes' dependency
 and security prompts. Do not use `--no-deps` to replace an active plugin.
 
 The plugin ID stays `openai-compatible`; keep your existing gateway URL, key variable, and credential.
@@ -117,8 +116,8 @@ hermes config get image_gen.provider
 hermes config get image_gen.model
 ```
 
-Confirm the installed source is this fork, the pinned revision is `d1c19d1…`, and the plugin
-version is `2.0.4`. Close and reopen CLI sessions. If using the messaging gateway, run:
+Confirm the installed source is this fork, the pinned revision is `ffdbf35…`, and the plugin
+version is `2.0.5`. Close and reopen CLI sessions. If using the messaging gateway, run:
 
 ```bash
 hermes gateway restart
@@ -129,7 +128,7 @@ Loading successfully does not prove your gateway supports SSE. An actual generat
 
 ### Subsequent updates and rollback
 
-To upgrade an existing installation to **2.0.4**, back it up first, run the pinned install command
+To upgrade an existing installation to **2.0.5**, back it up first, run the pinned install command
 in step 2 above, then verify and reload as described in step 3. This install command also works in
 Windows PowerShell; the Bash backup script above is for macOS/Linux/WSL, not native PowerShell.
 On native Windows, back up the active profile's plugin directory, configuration, credential file and

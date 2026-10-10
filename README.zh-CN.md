@@ -13,7 +13,7 @@
 
 ## 与原插件有什么不同？
 
-以下对比以原插件 **2.0.2** 为基准，工作区版本为 **2.0.5**；下方锁定安装示例仍指向此前已发布的 **2.0.4** 提交。
+以下对比以原插件 **2.0.2** 为基准，本 fork 当前版本为 **2.0.5**。
 
 | 功能 | 原插件 2.0.2 | 本项目 |
 |---|---|---|
@@ -86,11 +86,11 @@ hermes plugins enable openai-compatible
 ### 2. 安装已验证的 fork 提交
 
 ```bash
-hermes plugins install aluvien/hermes-imagegen-openai-stream --force --ref d1c19d1da95d37d4da4b341383c36efa3a79f844 --enable
+hermes plugins install aluvien/hermes-imagegen-openai-stream --force --ref ffdbf3558c12e02080f9a0cfd824b4385a945982 --enable
 ```
 
 这会安装指定的已验证提交，不一定是 `main` 上最新的提交。
-它适用于从锁定或未锁定的原插件安装切换来源，也适用于将旧版 fork 升级到 2.0.4。请阅读 Hermes 的依赖与安全提示，
+它适用于从锁定或未锁定的原插件安装切换来源，也适用于将旧版 fork 升级到 2.0.5。请阅读 Hermes 的依赖与安全提示，
 不要用 `--no-deps` 替换正在启用的插件。
 
 插件 ID 仍为 `openai-compatible`，已有网关地址、密钥变量和密钥继续保留。
@@ -114,7 +114,7 @@ hermes config get image_gen.provider
 hermes config get image_gen.model
 ```
 
-确认安装来源是这个 fork、锁定提交是 `d1c19d1…`、插件版本是 `2.0.4`。
+确认安装来源是这个 fork、锁定提交是 `ffdbf35…`、插件版本是 `2.0.5`。
 CLI 会话请关闭后重新启动。如果使用消息网关，执行：
 
 ```bash
@@ -126,7 +126,7 @@ hermes gateway restart
 
 ### 后续升级与回退
 
-将已有安装升级到 **2.0.4**：先备份，再执行上面第 2 步的锁定安装命令，最后按第 3 步
+将已有安装升级到 **2.0.5**：先备份，再执行上面第 2 步的锁定安装命令，最后按第 3 步
 检查并重新加载。安装命令也适用于 Windows PowerShell；上方 Bash 备份脚本用于
 macOS/Linux/WSL，不能直接在原生 PowerShell 中执行。原生 Windows 请先用本地备份方式
 备份当前档案的插件目录、配置、密钥文件及安装元数据，再替换插件。所有命令使用同一个
